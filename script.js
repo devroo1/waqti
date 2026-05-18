@@ -390,11 +390,6 @@ function _commitActivity(activityName, durationMinutes = 10) {
   renderRecent();
   updateGoalBar();
   hideActivityPopup();
-
-  // ✅ ربط العادات — تحديث تقدم العادات تلقائياً
-  if (typeof onActivityCommitted === 'function') {
-    onActivityCommitted(activityName, durationMinutes);
-  }
 }
 
 // ==========================================
@@ -1258,7 +1253,6 @@ function setupKeyboard() {
       if (e.key==='3') { e.preventDefault(); switchTab('plan');      return; }
       if (e.key==='4') { e.preventDefault(); switchTab('history');   return; }
       if (e.key==='5') { e.preventDefault(); switchTab('compare');   return; }
-      if (e.key==='6') { e.preventDefault(); switchTab('habits');    return; }
     }
 
     // أسهم — التنقل بين أيام الداش بورد
