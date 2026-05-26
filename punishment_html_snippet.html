@@ -1,0 +1,42 @@
+<!-- ====== بوب آب حاكم العقوبات ====== -->
+<!-- أضف هذا قبل سطر: <script type="module" src="firebase.js"></script> -->
+
+<div class="popup punish-popup" id="punishPopup">
+
+  <div class="punish-header">
+    <div class="punish-crown">👑</div>
+    <div class="punish-judge-label">حاكم العقوبات</div>
+  </div>
+
+  <div class="punish-streak-badge" id="punishStreak">
+    سجّلت ١٥+ دقيقة تسخيت متتالية! 🚨
+  </div>
+
+  <div class="punish-icon-wrap">
+    <div class="punish-icon" id="punishIcon">🏃</div>
+  </div>
+
+  <h2 class="punish-title" id="punishTitle">عقوبة رياضية!</h2>
+  <p  class="punish-task"  id="punishTask">اعمل ٢٠ قرفصاء الحين!</p>
+
+  <div class="punish-timer-wrap">
+    <svg class="punish-ring" viewBox="0 0 80 80">
+      <circle class="punish-ring-bg"  cx="40" cy="40" r="32"/>
+      <circle class="punish-ring-arc" id="punishArc" cx="40" cy="40" r="32"
+        stroke-dasharray="201.1" stroke-dashoffset="0"/>
+    </svg>
+    <div class="punish-countdown" id="punishCountdown">30</div>
+  </div>
+
+  <p class="punish-warn" id="punishWarn" style="opacity:0"></p>
+
+  <div class="punish-actions">
+    <button class="punish-done-btn" id="punishDoneBtn">
+      ✅ نفّذت العقوبة! <kbd>Enter</kbd>
+    </button>
+    <button class="punish-cheat-btn" id="punishCheatBtn">
+      🙈 حاول الغش <kbd>Esc</kbd>
+    </button>
+  </div>
+
+</div>
