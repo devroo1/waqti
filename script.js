@@ -367,10 +367,6 @@ function selectActivity(activityName, durationMinutes = state.intervalMinutes) {
 }
 
 function _commitActivity(activityName, durationMinutes = 10) {
-  // إعادة عداد التسخيت المتتالي لما يختار أي نشاط غير تسخيت
-  if (activityName !== 'تسخيت') {
-    punishTracker.consecutiveMin = 0;
-  }
   // ✅ إذا تغيّر اليوم منذ آخر تحميل، أعد تحميل بيانات اليوم الجديد أولاً
   if (state._loadedForDay && state._loadedForDay !== todayKey()) {
     loadTodayData();
@@ -635,7 +631,8 @@ function renderTimeline(data) {
     container.innerHTML = '<p class="empty-msg">لا توجد بيانات لهذا اليوم</p>';
     return;
   }
-  data.forEach(entry => {
+  const reversed = [...data].reverse();
+  reversed.forEach(entry => {
     const div = document.createElement('div');
     div.className = 'tl-item';
     div.style.setProperty('--c', entry.color || COLORS[entry.activity] || COLORS['أخرى']);
@@ -1601,27 +1598,13 @@ function startGuiltCountdown() {
   }, 1000);
 }
 
-/** سجّل التسخيت — يمر عبر نظام العقوبات إذا تجاوز العتبة */
+/** سجّل التسخيت */
 function confirmGuilt() {
   clearInterval(guilt.tickId);
   guilt.tickId = null;
-
-  // ---- نظام حاكم العقوبات ----
-  punishTracker.consecutiveMin += guilt.pendingDur;
-  if (punishTracker.consecutiveMin >= punishTracker.threshold) {
-    punishTracker.consecutiveMin = 0;
-    // أغلق بوب آب الضمير ثم افتح العقوبة
-    document.getElementById('guiltPopup').classList.remove('active');
-    setTimeout(() => showPunishmentPopup(), 250);
-    return; // لا تسجّل بعد — punishment.js يسجّل بعد اكتمال العقوبة
-  }
-
-  _doCommitGuilt();
-}
-
-/** يُستدعى بعد اكتمال العقوبة أو مباشرة إذا لم تصل العتبة */
-function _doCommitGuilt() {
   document.getElementById('guiltPopup').classList.remove('active');
+  // سجّل التسخيت ثم أعد بوب آب النشاط للإنتيرفال التالي
+  // ✅ تحقق من تغيير اليوم
   if (state._loadedForDay && state._loadedForDay !== todayKey()) {
     loadTodayData();
   }
@@ -1640,6 +1623,7 @@ function _doCommitGuilt() {
   saveTodayData();
   renderRecent();
   updateGoalBar();
+  // الآن أغلق بوب آب النشاط وانتقل للطابور
   popupOpen = false;
   state.activePopup = null;
   const overlay = document.getElementById('overlay');
@@ -2264,135 +2248,3 @@ document.addEventListener('DOMContentLoaded', () => {
   // زامن فوراً عند تحميل الصفحة
   document.addEventListener('DOMContentLoaded', syncMirror);
 })();
-
-// ==========================================
-// 👑 نظام حاكم العقوبات
-// ==========================================
-
-const punishTracker = {
-  consecutiveMin: 0,
-  threshold: 15,   // دقائق التسخيت المتتالية قبل العقوبة
-};
-
-const PUNISHMENTS = [
-  { icon:'🏃', title:'عقوبة رياضية!',    task:'قوم اعمل ٢٠ قرفصاء الحين قبل ما تكمل',                       color:'#4ade80' },
-  { icon:'💧', title:'عقوبة الترطيب!',   task:'قوم اشرب كأس ماء كامل وارجع',                                color:'#60a5fa' },
-  { icon:'📖', title:'عقوبة القراءة!',   task:'اقرأ صفحة واحدة من أي كتاب دراسي قبل ما تكمل',               color:'#a78bfa' },
-  { icon:'✍️', title:'عقوبة الكتابة!',   task:'اكتب جملة واحدة عن شي تعلمته اليوم قبل ما تكمل',             color:'#f59e0b' },
-  { icon:'🧘', title:'عقوبة التأمل!',    task:'خذ ٥ أنفاس عميقة وببطء... الحين، قبل ما تمسّ الجوال',        color:'#22d3ee' },
-  { icon:'📝', title:'عقوبة التخطيط!',   task:'اكتب ٣ أشياء تبي تذاكرها في الساعة الجاية',                  color:'#f97316' },
-  { icon:'💪', title:'عقوبة العضلات!',   task:'اعمل ١٥ ضغطة أرضية الحين — ما في تفاوض',                     color:'#f43f5e' },
-  { icon:'🧠', title:'عقوبة التركيز!',   task:'احفظ تعريفاً واحداً من مادتك في دقيقة واحدة',                 color:'#6c63ff' },
-  { icon:'🌊', title:'عقوبة الانتعاش!',  task:'قوم اغسل وجهك بالماء البارد وارجع',                           color:'#22d3ee' },
-  { icon:'⏰', title:'عقوبة التعهد!',    task:'قل بصوت عالٍ: "راح أذاكر الآن لمدة ٢٥ دقيقة بدون انقطاع"', color:'#f59e0b' },
-  { icon:'🚶', title:'عقوبة الحركة!',    task:'قم وامشِ ١٠ خطوات، ثم ارجع واجلس وافتح كتابك',               color:'#4ade80' },
-  { icon:'🔇', title:'عقوبة الصمت!',     task:'أغلق كل التطبيقات المفتوحة خلال ١٠ ثواني الآن',               color:'#a78bfa' },
-];
-
-const punishState = {
-  popupOpen: false,
-  countdown: 30,
-  tickId:    null,
-};
-
-function showPunishmentPopup() {
-  const p = PUNISHMENTS[Math.floor(Math.random() * PUNISHMENTS.length)];
-
-  document.getElementById('punishIcon').textContent  = p.icon;
-  document.getElementById('punishTitle').textContent = p.title;
-  document.getElementById('punishTask').textContent  = p.task;
-  document.getElementById('punishWarn').textContent  = '';
-  document.getElementById('punishPopup').style.setProperty('--p-color', p.color);
-
-  punishState.countdown = 30;
-  document.getElementById('punishCountdown').textContent = 30;
-  _punishArc(30, 30);
-
-  punishState.popupOpen = true;
-  state.activePopup = 'punishment';
-  document.getElementById('overlay').classList.add('active');
-  document.getElementById('punishPopup').classList.add('active');
-
-  _playPunishSound();
-  _startPunishCountdown();
-}
-
-function _startPunishCountdown() {
-  clearInterval(punishState.tickId);
-  punishState.tickId = setInterval(() => {
-    punishState.countdown--;
-    document.getElementById('punishCountdown').textContent = punishState.countdown;
-    _punishArc(punishState.countdown, 30);
-    if (punishState.countdown <= 5) _playPunishTick();
-    if (punishState.countdown <= 0) {
-      clearInterval(punishState.tickId);
-      completePunishment();
-    }
-  }, 1000);
-}
-
-function _punishArc(remaining, total) {
-  const arc = document.getElementById('punishArc');
-  if (arc) arc.setAttribute('stroke-dashoffset', ((total - remaining) / total) * 201.1);
-}
-
-function completePunishment() {
-  clearInterval(punishState.tickId);
-  punishState.tickId = null;
-  punishState.popupOpen = false;
-  state.activePopup = null;
-  document.getElementById('punishPopup').classList.remove('active');
-  // الآن سجّل التسخيت
-  _doCommitGuilt();
-}
-
-function cheatPunishment() {
-  const popup = document.getElementById('punishPopup');
-  popup.classList.remove('punish-shake');
-  void popup.offsetWidth;
-  popup.classList.add('punish-shake');
-  setTimeout(() => popup.classList.remove('punish-shake'), 600);
-  punishState.countdown = Math.min(punishState.countdown + 10, 99);
-  document.getElementById('punishCountdown').textContent = punishState.countdown;
-  const warn = document.getElementById('punishWarn');
-  warn.textContent = '😈 محاولة فاشلة! +١٠ ثواني عقاباً على الغشّة!';
-  setTimeout(() => { warn.textContent = ''; }, 2800);
-}
-
-function _playPunishSound() {
-  try {
-    const ctx = getAudioCtx(), now = ctx.currentTime;
-    [440, 370, 330].forEach((f, i) => {
-      const osc = ctx.createOscillator(), gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f * 2, now + i * 0.18);
-      osc.frequency.exponentialRampToValueAtTime(f, now + i * 0.18 + 0.28);
-      gain.gain.setValueAtTime(0.11, now + i * 0.18);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.18 + 0.33);
-      osc.start(now + i * 0.18); osc.stop(now + i * 0.18 + 0.38);
-    });
-  } catch(e) {}
-}
-
-function _playPunishTick() {
-  try {
-    const ctx = getAudioCtx(), now = ctx.currentTime;
-    const osc = ctx.createOscillator(), gain = ctx.createGain();
-    osc.connect(gain); gain.connect(ctx.destination);
-    osc.type = 'square'; osc.frequency.value = 720;
-    gain.gain.setValueAtTime(0.07, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
-    osc.start(now); osc.stop(now + 0.08);
-  } catch(e) {}
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('punishDoneBtn').addEventListener('click', completePunishment);
-  document.getElementById('punishCheatBtn').addEventListener('click', cheatPunishment);
-  document.addEventListener('keydown', e => {
-    if (state.activePopup !== 'punishment') return;
-    if (e.key === 'Enter')  { e.preventDefault(); completePunishment(); }
-    if (e.key === 'Escape') { e.preventDefault(); cheatPunishment(); }
-  });
-});
