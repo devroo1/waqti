@@ -327,27 +327,77 @@ function playMsgSound(isMine) {
   } catch(e) { /* صامت لو ما في Web Audio */ }
 }
 
+// مسار الشات يشمل تاريخ اليوم — ينحذف تلقائياً كل يوم
+function chatPath() {
+  const key = [fbState.myId, fbState.friendId].sort().join('_');
+  return `/chats/${getTodayKey()}/${key}`;
+}
+
+/** حذف رسائل يوم أمس (تُنظَّف من Firebase) */
+async function deleteYesterdayChat() {
+  if (!fbState.myId || !fbState.friendId) return;
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const y = yesterday.getFullYear();
+    const m = String(yesterday.getMonth()+1).padStart(2,'0');
+    const d = String(yesterday.getDate()).padStart(2,'0');
+    const yKey  = `${y}-${m}-${d}`;
+    const cKey  = [fbState.myId, fbState.friendId].sort().join('_');
+    await set(ref(db, `/chats/${yKey}/${cKey}`), null);
+  } catch(e) { /* صامت */ }
+}
+
+/** ريست التايم لاين والرسائل عند بداية يوم جديد */
+function onNewDay() {
+  // صفّر الشات في الواجهة
+  _renderedMsgIds.clear();
+  chatState.lastMsgCount = 0;
+  const container = document.getElementById('cmpChatMessages');
+  if (container) container.innerHTML = '<div class="cmp-chat-empty">يوم جديد — لا توجد رسائل بعد 💪</div>';
+
+  // صفّر تايم لاين الصديق
+  const tl = document.getElementById('cmpFriendTimeline');
+  if (tl) tl.innerHTML = '<p class="cmp-tl-empty">في انتظار بيانات الصديق ليوم جديد...</p>';
+
+  // أعد الاشتراك في الشات على المسار الجديد
+  if (chatState.unsubChat) { chatState.unsubChat(); chatState.unsubChat = null; }
+  subscribeChat();
+
+  // احذف رسائل أمس من Firebase
+  deleteYesterdayChat();
+
+  // جدوِّل الريست التالي لمنتصف الليل القادم
+  scheduleMidnightReset();
+}
+
+/** جدولة ريست منتصف الليل */
+function scheduleMidnightReset() {
+  const now       = new Date();
+  const tomorrow  = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const msUntil   = tomorrow.getTime() - now.getTime();
+  setTimeout(onNewDay, msUntil);
+}
+
 /** إرسال رسالة إلى Firebase */
 export async function sendChatMessage(text) {
   if (!fbState.connected || !fbState.myId || !text.trim()) return;
-  const chatKey = [fbState.myId, fbState.friendId].sort().join('_');
-  const msgId   = Date.now() + '_' + Math.random().toString(36).slice(2,6);
+  const msgId = Date.now() + '_' + Math.random().toString(36).slice(2,6);
   try {
-    await set(ref(db, `/chats/${chatKey}/${msgId}`), {
+    await set(ref(db, `${chatPath()}/${msgId}`), {
       sender:    fbState.myId,
       text:      text.trim(),
       timestamp: Date.now(),
     });
-    playMsgSound(true);  // صوت الإرسال
+    playMsgSound(true);
   } catch(e) { console.warn('Chat send error:', e); }
 }
 
 /** بدء الاستماع للمحادثة */
 function subscribeChat() {
   if (!fbState.myId || !fbState.friendId) return;
-  const chatKey = [fbState.myId, fbState.friendId].sort().join('_');
 
-  chatState.unsubChat = onValue(ref(db, `/chats/${chatKey}`), snap => {
+  chatState.unsubChat = onValue(ref(db, chatPath()), snap => {
     const data = snap.val() || {};
     const msgs = Object.entries(data)
       .map(([id, m]) => ({ id, ...m }))
@@ -355,10 +405,9 @@ function subscribeChat() {
 
     renderChatMessages(msgs);
 
-    // إشعار الصوت والنقطة الحمراء عند وصول رسالة جديدة
     const newCount = msgs.filter(m => m.sender !== fbState.myId).length;
     if (newCount > chatState.lastMsgCount) {
-      playMsgSound(false);  // صوت الاستقبال دائماً
+      playMsgSound(false);
       if (!chatState.isOnPage) showChatNotif();
     }
     chatState.lastMsgCount = newCount;
@@ -367,7 +416,13 @@ function subscribeChat() {
 
 function unsubscribeChat() {
   if (chatState.unsubChat) { chatState.unsubChat(); chatState.unsubChat = null; }
+  _renderedMsgIds.clear();
+  const container = document.getElementById('cmpChatMessages');
+  if (container) container.innerHTML = '<div class="cmp-chat-empty">لا توجد رسائل بعد — كن أول من يبدأ! 💪</div>';
 }
+
+// تتبع الرسائل المعروضة لتجنب إعادة البناء الكامل
+const _renderedMsgIds = new Set();
 
 function renderChatMessages(msgs) {
   const container = document.getElementById('cmpChatMessages');
@@ -375,21 +430,36 @@ function renderChatMessages(msgs) {
 
   if (!msgs.length) {
     container.innerHTML = '<div class="cmp-chat-empty">لا توجد رسائل بعد — كن أول من يبدأ! 💪</div>';
+    _renderedMsgIds.clear();
     return;
   }
 
-  container.innerHTML = msgs.map(m => {
+  // إزالة placeholder لو موجود
+  const empty = container.querySelector('.cmp-chat-empty');
+  if (empty) empty.remove();
+
+  // فقط أضف الرسائل الجديدة (incremental)
+  let addedAny = false;
+  msgs.forEach(m => {
+    if (_renderedMsgIds.has(m.id)) return;
+    _renderedMsgIds.add(m.id);
+
     const isMine = m.sender === fbState.myId;
     const time   = new Date(m.timestamp).toLocaleTimeString('ar-IQ', { hour12: true, hour: '2-digit', minute: '2-digit' });
-    return `
-      <div class="cmp-msg ${isMine ? 'mine' : 'theirs'}">
-        <div class="cmp-msg-bubble">${escapeHtml(m.text)}</div>
-        <div class="cmp-msg-meta">${isMine ? 'أنت' : m.sender} · ${time}</div>
-      </div>`;
-  }).join('');
+    const el     = document.createElement('div');
+    el.className = `cmp-msg ${isMine ? 'mine' : 'theirs'}`;
+    el.dataset.msgId = m.id;
+    el.innerHTML = `
+      <div class="cmp-msg-bubble">${escapeHtml(m.text)}</div>
+      <div class="cmp-msg-meta">${isMine ? 'أنت' : m.sender} · ${time}</div>`;
+    container.appendChild(el);
+    addedAny = true;
+  });
 
-  // تمرير للأسفل
-  container.scrollTop = container.scrollHeight;
+  // تمرير للأسفل فقط لو في رسائل جديدة
+  if (addedAny) {
+    container.scrollTop = container.scrollHeight;
+  }
 }
 
 function escapeHtml(str) {
@@ -460,18 +530,23 @@ function renderFriendTimeline(rawData) {
   // تحديث التاريخ
   if (dateEl && rawData.date) dateEl.textContent = rawData.date;
 
-  container.innerHTML = rawData.timeline.map(entry => {
+  // الأحدث أولاً
+  const sorted = [...rawData.timeline].reverse();
+
+  container.innerHTML = sorted.map(entry => {
     const color = activityColors[entry.activity] || '#a78bfa';
     const h = Math.floor((entry.duration || 0) / 60);
     const m = (entry.duration || 0) % 60;
     const durText = h > 0 ? `${h}س ${m}د` : `${m}د`;
-    const time = entry.time || '';
+    const timeRange = (entry.start && entry.end)
+      ? `${entry.start} ← ${entry.end}`
+      : (entry.start || entry.end || '');
     return `
       <div class="cmp-tl-item" style="border-right-color:${color}">
         <div class="cmp-tl-dot" style="background:${color}"></div>
         <div class="cmp-tl-info">
           <div class="cmp-tl-act">${escapeHtml(entry.activity)}</div>
-          <div class="cmp-tl-time">${time}</div>
+          ${timeRange ? `<div class="cmp-tl-time">${timeRange}</div>` : ''}
         </div>
         <div class="cmp-tl-dur">${durText}</div>
       </div>`;
@@ -520,11 +595,12 @@ export async function syncToFirebaseWithTimeline() {
     const raw      = localStorage.getItem(`waqti_${today}`);
     const entries  = raw ? JSON.parse(raw) : [];
 
-    // نبني الـ timeline بشكل مبسّط
+    // نبني الـ timeline مع وقت البداية والنهاية
     const timeline = entries.map((e, i) => ({
       activity: e.activity || 'أخرى',
       duration: e.duration || 0,
-      time:     e.time || '',
+      start:    e.start    || '',
+      end:      e.end      || '',
     }));
 
     // نرفع الإحصائيات
@@ -623,6 +699,7 @@ window.addEventListener('DOMContentLoaded', () => {
       // بدء الشات والتايم لاين
       subscribeChat();
       subscribeFriendTimeline();
+      scheduleMidnightReset();   // ريست تلقائي منتصف الليل
 
       document.getElementById('cmpSetupCard').style.display = 'none';
       document.getElementById('cmpBoard').style.display     = 'block';
