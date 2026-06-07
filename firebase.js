@@ -9,7 +9,7 @@ import { getDatabase, ref, set, update, onValue, get }
 
 // ─── إعدادات Firebase ───────────────────────
 const firebaseConfig = {
-  apiKey:            "AIzaSyBW_cc4iRrBclqK6xSJDb_goaLt1WOTs-E",
+  //apiKey:            "AIzaSyBW_cc4iRrBclqK6xSJDb_goaLt1WOTs-E",
   authDomain:        "waqti-97e97.firebaseapp.com",
   databaseURL:       "https://waqti-97e97-default-rtdb.firebaseio.com",
   projectId:         "waqti-97e97",
