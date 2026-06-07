@@ -9,14 +9,14 @@ import { getDatabase, ref, set, update, onValue, get }
 
 // ─── إعدادات Firebase ───────────────────────
 const firebaseConfig = {
-  //apiKey:            "AIzaSyBW_cc4iRrBclqK6xSJDb_goaLt1WOTs-E",
-  //authDomain:        "waqti-97e97.firebaseapp.com",
-  //databaseURL:       "https://waqti-97e97-default-rtdb.firebaseio.com",
- // projectId:         "waqti-97e97",
- // storageBucket:     "waqti-97e97.firebasestorage.app",
-//  messagingSenderId: "227376312121",
- // appId:             "1:227376312121:web:b01d54d2ef7ab51ce782e8",
-//  measurementId:     "G-YPNZ0S3CSH"
+  apiKey:            "AIzaSyBW_cc4iRrBclqK6xSJDb_goaLt1WOTs-E",
+  authDomain:        "waqti-97e97.firebaseapp.com",
+  databaseURL:       "https://waqti-97e97-default-rtdb.firebaseio.com",
+  projectId:         "waqti-97e97",
+  storageBucket:     "waqti-97e97.firebasestorage.app",
+  messagingSenderId: "227376312121",
+  appId:             "1:227376312121:web:b01d54d2ef7ab51ce782e8",
+  measurementId:     "G-YPNZ0S3CSH"
 };
 
 const app = initializeApp(firebaseConfig);
