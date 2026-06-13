@@ -1,6 +1,6 @@
 /**
  * firebase.js — نظام المزامنة والمقارنة Real-Time
- * يُحمَّل كـ ES Module منفصل
+ * يُحمَّل كـ ES Module sdfsdfمنفصل
  */
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
