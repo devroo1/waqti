@@ -1472,12 +1472,13 @@ function setupEventListeners() {
   document.getElementById('swMinimize').addEventListener('click', sprintMinimize);
   document.getElementById('swExpand').addEventListener('click', sprintExpand);
 
-  /* ---- إذن الإشعارات ---- */
+  /* ---- بدء التايمر بالضغط الطبيعي على الزر ---- */
   document.getElementById('startBtn').addEventListener('click', () => {
     if ('Notification' in window && Notification.permission==='default') {
       Notification.requestPermission();
     }
-  }, { once:true });
+    if (!state.running) startTimer();
+  });
 }
 
 // ==========================================
