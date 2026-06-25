@@ -2347,3 +2347,94 @@ canvas { max-width:100%; }
   color: var(--text3);
   margin-top: 2px;
 }
+
+/* ==========================================
+   ريسبونزف — الجوالات والشاشات الصغيرة
+   ========================================== */
+
+@media (max-width: 720px) {
+
+  /* ---- التوب بار ---- */
+  .topbar {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .topbar-left { gap: 8px; }
+  .logo { font-size: 1rem; }
+  .streak-badge { font-size: .68rem; padding: 2px 7px; }
+
+  .tabs {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    justify-content:flex-start;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab-btn {
+    flex-shrink: 0;
+    padding: 8px 12px;
+    font-size: .78rem;
+  }
+
+  .topbar-right { gap: 4px; }
+  .icon-btn { height: 32px; padding: 0 8px; font-size: .8rem; }
+
+  /* اختصارات الكيبورد لا تنطبق على الجوال */
+  kbd { display: none; }
+  /* عوّض المسافة التي كانت تأخذها kbd */
+  .tab-btn, .icon-btn, .ctrl-btn, .small-btn, .act-btn { gap: 0; }
+
+  /* ---- الصفحات ---- */
+  .page { padding: 16px 14px 90px; max-width: 100%; }
+
+  /* ---- الساعة ---- */
+  .current-time { font-size: 2.2rem; letter-spacing: 2px; }
+
+  /* ---- بطاقة التايمر ---- */
+  .timer-card { padding: 20px 14px; }
+  .timer-ring-wrapper {
+    width: min(220px, 70vw);
+    height: min(220px, 70vw);
+  }
+  .ring-svg { width: 100%; height: 100%; }
+
+  .controls { width: 100%; }
+  .ctrl-btn { flex: 1 1 auto; min-width: 0; padding: 12px 10px; font-size: .85rem; }
+  .ctrl-btn.main { order: 1; flex: 1 1 100%; }
+  .ctrl-btn.reset { order: 2; }
+  .ctrl-btn.quick { order: 3; }
+
+  /* ---- ويدجيت تايمر السبرينت ---- */
+  .sprint-widget {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+  }
+  .sprint-widget.minimized { left: auto; right: 12px; width: auto; }
+
+  /* ---- جداول/شبكات الإحصائيات ---- */
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .sp-grid { grid-template-columns: 1fr; }
+  .activity-grid { grid-template-columns: repeat(2, 1fr); }
+  .export-options { grid-template-columns: 1fr; }
+
+  /* ---- بوب آبات ---- */
+  .popup { padding: 20px 16px; }
+
+  /* ---- صفحة المقارنة ---- */
+  .cmp-grid { grid-template-columns: 1fr; gap: 16px; }
+  .cmp-input-row { flex-direction: column; }
+}
+
+@media (max-width: 400px) {
+  .topbar-left { flex-wrap: wrap; }
+  .current-time { font-size: 1.8rem; }
+  .timer-ring-wrapper { width: 78vw; height: 78vw; }
+  .activity-grid { grid-template-columns: repeat(2, 1fr); }
+  .ctrl-btn { font-size: .8rem; padding: 10px 8px; }
+}
