@@ -1169,11 +1169,18 @@ function setupSprintDrag() {
   };
   const onUp = () => { dragging = false; widget.style.transition = ''; };
 
-  handle.addEventListener('mousedown',  e => onDown(e.clientX, e.clientY));
+  handle.addEventListener('mousedown',  e => {
+    if (e.target.closest('.sw-min-btn')) return;
+    onDown(e.clientX, e.clientY);
+  });
   document.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
   document.addEventListener('mouseup',   onUp);
 
-  handle.addEventListener('touchstart',  e => { onDown(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, { passive:false });
+  handle.addEventListener('touchstart',  e => {
+    if (e.target.closest('.sw-min-btn')) return;
+    onDown(e.touches[0].clientX, e.touches[0].clientY);
+    e.preventDefault();
+  }, { passive:false });
   document.addEventListener('touchmove',  e => { if(dragging){onMove(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault();} }, { passive:false });
   document.addEventListener('touchend',   onUp);
 }
