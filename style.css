@@ -404,8 +404,12 @@ canvas { max-width:100%; }
 
 /* ====== أوفرلاي وبوب آب ====== */
 .overlay {
-  display:none; position:fixed; inset:0;
-  background:rgba(0,0,0,.65); backdrop-filter:blur(4px); z-index:200;
+  display:none; 
+   position:fixed;
+   inset:0;
+  background:rgba(0,0,0,.65);
+   /*backdrop-filter:blur(4px);*/
+   z-index:200;
 }
 .overlay.active { display:block; }
 
