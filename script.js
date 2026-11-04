@@ -360,7 +360,7 @@ function selectActivity(activityName, durationMinutes = state.intervalMinutes) {
     // أخفِ بوب آب النشاط مؤقتاً دون drain، وأظهر بوب آب الضمير
     document.getElementById('popup').classList.remove('active');
     state.activePopup = 'guilt';
-    showGuiltPopup(durationMinutes);
+    openGuiltFlow(durationMinutes);   // يختار: النظام الأصلي أو المخصص (انظر Custom Guilt System)
     return;
   }
   _commitActivity(activityName, durationMinutes);
@@ -1610,6 +1610,7 @@ function startGuiltCountdown() {
 function confirmGuilt() {
   clearInterval(guilt.tickId);
   guilt.tickId = null;
+  cgCloseCustom();   // لو كان النظام المخصص مفتوحًا: أغلقه وأوقف صوته (لا شيء يحصل في النظام الأصلي)
   document.getElementById('guiltPopup').classList.remove('active');
   // سجّل التسخيت ثم أعد بوب آب النشاط للإنتيرفال التالي
   // ✅ تحقق من تغيير اليوم
@@ -1695,6 +1696,869 @@ document.addEventListener('keydown', e => {
 document.addEventListener('DOMContentLoaded', () => {
   setupGuiltEvents();
 });
+
+// ==========================================
+// 🎭 Custom Guilt System — نظام ضربة الضمير المخصص
+// ------------------------------------------
+// • الإعدادات النصية  → localStorage  (المفتاح: waqti_customGuilt)
+// • الصورة والصوت     → IndexedDB     (قاعدة: waqti_custom_guilt)
+// • كل شيء محلي على جهازك فقط — لا يُرسل أي شيء إلى Firebase أو أي خادم
+// • النظام الأصلي (showGuiltPopup) ما تغيّر
+// ==========================================
+
+const CG_LS_KEY     = 'waqti_customGuilt';
+const CG_DB_NAME    = 'waqti_custom_guilt';
+const CG_DB_STORE   = 'files';
+const CG_MAX_IMAGE  = 10 * 1024 * 1024;   // 10 ميجا
+const CG_MAX_AUDIO  = 25 * 1024 * 1024;   // 25 ميجا
+const CG_MAX_TEXT   = 2000;
+const CG_IMAGE_EXT  = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+const CG_AUDIO_EXT  = ['mp3', 'wav', 'ogg'];
+const CG_DEFAULTS   = { enabled: true, preferred: 'ask', text: '', volume: 100, muted: false, duration: 10 };
+
+const cg = {
+  cfg:         { ...CG_DEFAULTS },
+  files:       { image: null, audio: null },   // السجلات المحفوظة: {blob, name, type, size}
+  filesReady:  false,
+  loadPromise: null,
+  dbPromise:   null,
+  storageErr:  null,
+  inited:      false,
+  stage:       null,      // null | 'choose' | 'custom' | 'preview' | 'settings'
+  pendingDur:  10,
+  // عرض النظام المخصص
+  customTick:  null,
+  customLeft:  0,
+  customTotal: 0,
+  customSrc:   null,
+  customUrls:  [],
+  // الإعدادات
+  draft:       null,
+  returnTo:    null,      // 'choose' | 'standalone'
+  previewFor:  null,
+  previewUrl:  null,
+  statusTimer: null,
+  // الصوت
+  audioEl:     null,
+  audioUrl:    null,
+};
+
+function cgEl(id) { return document.getElementById(id); }
+
+/* ---------- الإعدادات (localStorage) ---------- */
+
+function cgSanitize(r) {
+  const d = CG_DEFAULTS;
+  r = (r && typeof r === 'object') ? r : {};
+  const num = (v, min, max, def) => {
+    v = Number(v);
+    return Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : def;
+  };
+  return {
+    enabled:   typeof r.enabled === 'boolean' ? r.enabled : d.enabled,
+    preferred: ['ask', 'original', 'custom'].includes(r.preferred) ? r.preferred : d.preferred,
+    text:      typeof r.text === 'string' ? r.text.slice(0, CG_MAX_TEXT) : d.text,
+    volume:    num(r.volume, 0, 100, d.volume),
+    muted:     typeof r.muted === 'boolean' ? r.muted : d.muted,
+    duration:  [10, 20, 30, 60].includes(Number(r.duration)) ? Number(r.duration) : d.duration,
+  };
+}
+
+function cgLoadConfig() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(CG_LS_KEY) || 'null'); } catch (e) { raw = null; }
+  cg.cfg = cgSanitize(raw);
+}
+
+/** يكتب الإعدادات في localStorage — يرمي خطأ لو فشل */
+function cgWriteConfig(cfg) {
+  localStorage.setItem(CG_LS_KEY, JSON.stringify(cfg));
+}
+
+function cgSetPreferred(mode) {
+  const next = { ...cg.cfg, preferred: mode };
+  try { cgWriteConfig(next); cg.cfg = next; } catch (e) { console.warn('CustomGuilt: تعذّر حفظ الاختيار', e); }
+}
+
+/* ---------- الملفات (IndexedDB) ---------- */
+
+function cgOpenDB() {
+  if (cg.dbPromise) return cg.dbPromise;
+  cg.dbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB) { reject(new Error('NO_IDB')); return; }
+    let req;
+    try { req = indexedDB.open(CG_DB_NAME, 1); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(CG_DB_STORE)) req.result.createObjectStore(CG_DB_STORE);
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => { db.close(); cg.dbPromise = null; };
+      resolve(db);
+    };
+    req.onerror   = () => reject(req.error || new Error('IDB_OPEN'));
+    req.onblocked = () => reject(new Error('IDB_BLOCKED'));
+  });
+  cg.dbPromise.catch(() => { cg.dbPromise = null; });
+  return cg.dbPromise;
+}
+
+function cgValidRecord(r) {
+  return (r && r.blob instanceof Blob && r.blob.size > 0) ? r : null;
+}
+
+async function cgIdbLoad() {
+  const db = await cgOpenDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(CG_DB_STORE, 'readonly');
+    const st  = tx.objectStore(CG_DB_STORE);
+    const out = { image: null, audio: null };
+    const r1  = st.get('image');
+    const r2  = st.get('audio');
+    r1.onsuccess = () => { out.image = cgValidRecord(r1.result); };
+    r2.onsuccess = () => { out.audio = cgValidRecord(r2.result); };
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = tx.onabort = () => reject(tx.error || new Error('IDB_READ'));
+  });
+}
+
+/** changes = { image?: record|null, audio?: record|null } — null يعني احذف، غير موجود يعني ما تغيّر */
+async function cgIdbApply(changes) {
+  const db = await cgOpenDB();
+  return new Promise((resolve, reject) => {
+    let tx;
+    try { tx = db.transaction(CG_DB_STORE, 'readwrite'); } catch (e) { reject(e); return; }
+    const st = tx.objectStore(CG_DB_STORE);
+    try {
+      ['image', 'audio'].forEach(k => {
+        if (!(k in changes)) return;
+        if (changes[k] === null) st.delete(k); else st.put(changes[k], k);
+      });
+    } catch (e) {
+      try { tx.abort(); } catch (_) {}
+      reject(e);
+      return;
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('IDB_WRITE'));
+    tx.onabort = () => reject(tx.error || new Error('IDB_ABORT'));
+  });
+}
+
+function cgErrMsg(e, what) {
+  const name = (e && e.name) || '';
+  const msg  = (e && e.message) || '';
+  if (name === 'QuotaExceededError' || /quota/i.test(msg)) {
+    return 'مساحة التخزين في المتصفح ممتلئة، فما قدرت ' + what + '. احذف ملفات ثانية أو اختر ملفًا أصغر.';
+  }
+  if (msg === 'NO_IDB' || name === 'SecurityError' || name === 'InvalidStateError' || msg === 'IDB_BLOCKED') {
+    return 'المتصفح ما يسمح بتخزين الملفات محليًا (ممكن بسبب التصفح الخاص أو منع التخزين). النص والإعدادات تنحفظ، لكن الصورة والصوت لا.';
+  }
+  return 'صار خطأ وما قدرت ' + what + '. جرّب مرة ثانية.';
+}
+
+/* ---------- أدوات صغيرة ---------- */
+
+function cgHasContent(c, f) {
+  return !!(((c && c.text) || '').trim() || (f && f.image) || (f && f.audio));
+}
+
+function cgFmtSize(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
+
+function cgExt(name) { return ((name || '').split('.').pop() || '').toLowerCase(); }
+
+function cgSummary() {
+  const parts = [];
+  if (cg.files.image) parts.push('🖼 صورة');
+  if (cg.files.audio) parts.push('🔊 صوت');
+  if ((cg.cfg.text || '').trim()) parts.push('✍️ نص');
+  return parts.join(' · ');
+}
+
+/** يتأكد إن الخلفية الداكنة ظاهرة (البوب آب الأصلي يخفيها بعد 380ms، فنعيدها بعده مباشرة) */
+function cgEnsureOverlay() {
+  const ov = cgEl('overlay');
+  ov.classList.add('active');
+  setTimeout(() => { if (cg.stage) ov.classList.add('active'); }, 380);
+}
+
+/* ---------- الصوت ---------- */
+
+function cgStopAudio() {
+  const a = cg.audioEl;
+  if (a) {
+    try { a.pause(); } catch (e) {}
+    a.removeAttribute('src');
+    try { a.load(); } catch (e) {}
+  }
+  if (cg.audioUrl) URL.revokeObjectURL(cg.audioUrl);
+  cg.audioEl  = null;
+  cg.audioUrl = null;
+  cgSyncAudioButtons();
+}
+
+function cgPlayAudio(rec, volume, cb) {
+  cgStopAudio();
+  cb = cb || {};
+  if (!rec || !rec.blob) return;
+  const url = URL.createObjectURL(rec.blob);
+  const a   = new Audio();
+  a.preload = 'auto';
+  a.volume  = Math.min(1, Math.max(0, volume / 100));
+  a.addEventListener('ended', () => { if (cg.audioEl === a) { cgStopAudio(); if (cb.onEnd) cb.onEnd(); } });
+  a.addEventListener('error', () => { if (cg.audioEl === a) { cgStopAudio(); if (cb.onError) cb.onError(); } });
+  cg.audioEl  = a;
+  cg.audioUrl = url;
+  a.src = url;
+  const p = a.play();
+  if (p && typeof p.catch === 'function') {
+    p.catch(err => {
+      if (cg.audioEl !== a) return;
+      if (err && err.name === 'NotAllowedError') {
+        if (cb.onBlocked) cb.onBlocked();
+      } else if (err && err.name !== 'AbortError') {
+        cgStopAudio();
+        if (cb.onError) cb.onError();
+      }
+    });
+  }
+  cgSyncAudioButtons();
+}
+
+/** هل الصوت مسموح أن يشتغل؟ (مو مكتوم ومستواه فوق 0) */
+function cgAudible(src) { return !!src.audio && !src.muted && src.volume > 0; }
+
+/* ---------- تدفق ضربة الضمير ---------- */
+
+/** نقطة الدخول: تُستدعى من selectActivity('تسخيت') بدل showGuiltPopup مباشرة */
+function openGuiltFlow(durationMinutes) {
+  guilt.pendingDur = durationMinutes;
+  cg.pendingDur    = durationMinutes;
+
+  // لو الملفات لسه تتحمّل من التخزين، انتظر لحظة
+  if (!cg.filesReady && cg.loadPromise) {
+    cg.loadPromise.then(() => openGuiltFlow(durationMinutes));
+    return;
+  }
+
+  const c = cg.cfg;
+  if (!c.enabled || c.preferred === 'original') { showGuiltPopup(durationMinutes); return; }
+  if (c.preferred === 'custom' && cgHasContent(c, cg.files)) { cgShowCustom(durationMinutes); return; }
+  cgShowChooser();
+}
+
+/* ---- نافذة الاختيار ---- */
+
+function cgShowChooser() {
+  cg.stage = 'choose';
+  state.activePopup = 'cgChoose';
+  const has = cgHasContent(cg.cfg, cg.files);
+  cgEl('cgPickCustomDesc').textContent = has ? cgSummary() : 'لسه ما جهّزته — اضغط لإعداده';
+  cgEl('cgRemember').checked = false;
+  cgEnsureOverlay();
+  const pop = cgEl('cgChoosePopup');
+  pop.classList.add('active');
+  pop.focus({ preventScroll: true });
+}
+
+function cgPickOriginal() {
+  if (cg.stage !== 'choose') return;
+  if (cgEl('cgRemember').checked) cgSetPreferred('original');
+  cgEl('cgChoosePopup').classList.remove('active');
+  cg.stage = null;
+  state.activePopup = 'guilt';
+  showGuiltPopup(cg.pendingDur);      // النظام الأصلي كما هو
+}
+
+function cgPickCustom() {
+  if (cg.stage !== 'choose') return;
+  if (!cgHasContent(cg.cfg, cg.files)) { cgOpenSettings({ from: 'choose' }); return; }
+  if (cgEl('cgRemember').checked) cgSetPreferred('custom');
+  cgEl('cgChoosePopup').classList.remove('active');
+  cgShowCustom(cg.pendingDur);
+}
+
+/* ---- عرض النظام المخصص ---- */
+
+function cgRenderText(box, text) {
+  box.replaceChildren();
+  const t = text || '';
+  if (!t.trim()) { box.hidden = true; return; }
+  t.replace(/\r\n?/g, '\n').split('\n').forEach(line => {
+    const p = document.createElement('p');
+    p.dir = 'auto';                       // عربي → RTL ، إنجليزي → LTR
+    if (line === '') p.className = 'cg-blank'; else p.textContent = line;
+    box.appendChild(p);
+  });
+  box.hidden = false;
+}
+
+function cgCountUI() {
+  const left  = Math.max(0, cg.customLeft);
+  cgEl('cgCustomBar').style.width = (cg.customTotal ? (left / cg.customTotal) * 100 : 0) + '%';
+  cgEl('cgCustomCount').textContent = 'يُسجَّل التسخيت تلقائيًا بعد ' + left + ' ث';
+}
+
+function cgPlayCustomAudio() {
+  const src = cg.customSrc;
+  if (!src || !cgAudible(src)) return;
+  cgEl('cgReplayBtn').hidden = true;
+  cgPlayAudio(src.audio, src.volume, {
+    onBlocked: () => { cgEl('cgReplayBtn').hidden = false; },   // المتصفح منع التشغيل التلقائي
+    onError:   () => { cgEl('cgReplayBtn').hidden = true; },
+  });
+}
+
+function cgShowCustom(dur, opts) {
+  const preview = !!(opts && opts.preview);
+  const src = preview
+    ? { text: cg.draft.text, volume: cg.draft.volume, muted: cg.draft.muted, duration: cg.draft.duration, image: cg.draft.image, audio: cg.draft.audio }
+    : { text: cg.cfg.text,   volume: cg.cfg.volume,   muted: cg.cfg.muted,   duration: cg.cfg.duration,   image: cg.files.image,  audio: cg.files.audio };
+
+  cgCleanupCustom(true);
+  cg.customSrc = src;
+  cg.stage = preview ? 'preview' : 'custom';
+  state.activePopup = preview ? 'cgPreview' : 'cgCustom';
+  if (!preview) guilt.pendingDur = dur;
+
+  // الصورة (فقط لو اخترتها)
+  const img = cgEl('cgCustomImg');
+  if (src.image) {
+    const url = URL.createObjectURL(src.image.blob);
+    cg.customUrls.push(url);
+    img.onerror = () => { img.hidden = true; img.removeAttribute('src'); };
+    img.src = url;
+    img.hidden = false;
+  } else {
+    img.hidden = true;
+    img.removeAttribute('src');
+  }
+
+  // النص (فقط لو كتبته)
+  cgRenderText(cgEl('cgCustomText'), src.text);
+
+  // الأزرار والعداد
+  cgEl('cgPreviewBadge').hidden = !preview;
+  cgEl('cgCountdownBox').hidden = preview;
+  cgEl('cgReplayBtn').hidden = true;
+  cgEl('cgCustomConfirmBtn').innerHTML = preview
+    ? 'إغلاق المعاينة <kbd>Esc</kbd>'
+    : 'سجّل التسخيت وكمّل <kbd>Enter</kbd>';
+
+  cgEnsureOverlay();
+  const pop = cgEl('cgCustomPopup');
+  cgEl('cgCustomScroll').scrollTop = 0;
+  pop.classList.add('active');
+  pop.focus({ preventScroll: true });
+
+  // الصوت (فقط لو اخترته وما هو مكتوم)
+  cgPlayCustomAudio();
+
+  // العداد التنازلي — نفس فكرة الأصلي: بعده يُسجَّل التسخيت تلقائيًا
+  if (!preview) {
+    cg.customTotal = src.duration;
+    cg.customLeft  = src.duration;
+    cgEl('cgCustomBar').style.transition = 'none';
+    cgCountUI();
+    void cgEl('cgCustomBar').offsetWidth;
+    cgEl('cgCustomBar').style.transition = '';
+    cg.customTick = setInterval(() => {
+      cg.customLeft--;
+      cgCountUI();
+      if (cg.customLeft <= 0) {
+        clearInterval(cg.customTick);
+        cg.customTick = null;
+        cgConfirmCustom();
+      }
+    }, 1000);
+  }
+}
+
+/** ينظّف الصوت والعداد والروابط المؤقتة. keepDom=true يعني لا تمسح عناصر الصفحة الآن */
+function cgCleanupCustom(keepDom) {
+  clearInterval(cg.customTick);
+  cg.customTick = null;
+  cgStopAudio();
+  cg.customUrls.forEach(u => URL.revokeObjectURL(u));
+  cg.customUrls = [];
+  cg.customSrc  = null;
+  if (!keepDom) {
+    // نمسح المحتوى بعد ما تختفي النافذة (عشان ما يقفز الشكل أثناء الإغلاق)
+    setTimeout(() => {
+      if (cg.stage === 'custom' || cg.stage === 'preview') return;
+      const img = cgEl('cgCustomImg');
+      img.hidden = true;
+      img.removeAttribute('src');
+      cgEl('cgCustomText').replaceChildren();
+      cgEl('cgCustomText').hidden = true;
+    }, 450);
+  }
+}
+
+/** يغلق النظام المخصص — يُستدعى من confirmGuilt() قبل تسجيل التسخيت */
+function cgCloseCustom() {
+  if (cg.stage !== 'custom') return;
+  cg.stage = null;
+  cgEl('cgCustomPopup').classList.remove('active');
+  cgCleanupCustom(false);
+}
+
+/** زر التأكيد / انتهاء العداد — يمر دائمًا عبر confirmGuilt الأصلية (تسجيل واحد فقط) */
+function cgConfirmCustom() {
+  if (cg.stage !== 'custom') return;     // حماية من التسجيل مرتين
+  confirmGuilt();
+}
+
+function cgClosePreview() {
+  if (cg.stage !== 'preview') return;
+  cgEl('cgCustomPopup').classList.remove('active');
+  cg.stage = 'settings';
+  state.activePopup = 'cgSettings';
+  cgCleanupCustom(false);
+  const pop = cgEl('cgSettingsPopup');
+  pop.classList.add('active');
+  pop.focus({ preventScroll: true });
+}
+
+/* ---------- نافذة الإعدادات ---------- */
+
+function cgMakeDraft() {
+  return { ...cg.cfg, image: cg.files.image, audio: cg.files.audio };
+}
+
+function cgIsDirty() {
+  if (!cg.draft || (cg.stage !== 'settings' && cg.stage !== 'preview')) return false;
+  const d = cg.draft, c = cg.cfg;
+  return d.enabled !== c.enabled || d.preferred !== c.preferred || d.text !== c.text ||
+         d.volume !== c.volume || d.muted !== c.muted || d.duration !== c.duration ||
+         d.image !== cg.files.image || d.audio !== cg.files.audio;
+}
+
+function cgSetStatus(msg, type) {
+  const box = cgEl('cgStatus');
+  clearTimeout(cg.statusTimer);
+  if (!msg) { box.hidden = true; box.textContent = ''; return; }
+  box.textContent = msg;
+  box.className = 'cg-status ' + (type || 'info');
+  box.hidden = false;
+  cgEl('cgSettingsBody').scrollTop = 0;
+  if (type !== 'error') cg.statusTimer = setTimeout(() => { box.hidden = true; }, 6000);
+}
+
+function cgShowConfirm(msg, actions) {
+  cgEl('cgConfirmMsg').textContent = msg;
+  const box = cgEl('cgConfirmBtns');
+  box.replaceChildren();
+  actions.forEach(a => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cg-btn' + (a.cls ? ' cg-btn-' + a.cls : '');
+    b.textContent = a.label;
+    b.addEventListener('click', () => { cgHideConfirm(); if (a.fn) a.fn(); });
+    box.appendChild(b);
+  });
+  cgEl('cgConfirmBar').hidden = false;
+  cgEl('cgSettingsBody').scrollTop = 0;
+}
+
+function cgHideConfirm() {
+  cgEl('cgConfirmBar').hidden = true;
+  cgEl('cgConfirmBtns').replaceChildren();
+}
+
+function cgSyncAudioButtons() {
+  const play = cgEl('cgPlayBtn');
+  if (!play || !cg.draft) return;
+  play.disabled = !cg.draft.audio;
+  cgEl('cgStopBtn').disabled = !cg.audioEl;
+}
+
+function cgRenderSettings(syncInputs) {
+  const d = cg.draft;
+  if (!d) return;
+  cgEl('cgEnabled').checked   = d.enabled;
+  cgEl('cgPreferred').value   = d.preferred;
+  cgEl('cgDuration').value    = String(d.duration);
+  cgEl('cgVolume').value      = d.volume;
+  cgEl('cgVolumeOut').textContent = d.volume + '%';
+  cgEl('cgMute').checked      = d.muted;
+  if (syncInputs) cgEl('cgText').value = d.text;
+  cgEl('cgTextCount').textContent = d.text.length;
+
+  // الصورة + المعاينة
+  const wrap = cgEl('cgImagePreviewWrap');
+  const img  = cgEl('cgImagePreview');
+  if (cg.previewFor !== d.image) {
+    if (cg.previewUrl) { URL.revokeObjectURL(cg.previewUrl); cg.previewUrl = null; }
+    cg.previewFor = d.image;
+    if (d.image) { cg.previewUrl = URL.createObjectURL(d.image.blob); img.src = cg.previewUrl; }
+    else img.removeAttribute('src');
+  }
+  wrap.hidden = !d.image;
+  cgEl('cgImageName').textContent = d.image ? d.image.name + ' (' + cgFmtSize(d.image.size) + ')' : 'لم تُختر صورة';
+  cgEl('cgRemoveImageBtn').disabled = !d.image;
+
+  // الصوت
+  cgEl('cgAudioName').textContent = d.audio ? d.audio.name + ' (' + cgFmtSize(d.audio.size) + ')' : 'لم يُختر ملف صوت';
+  cgEl('cgRemoveAudioBtn').disabled = !d.audio;
+  cgSyncAudioButtons();
+
+  // حالة التعديلات
+  const dirty = cgIsDirty();
+  cgEl('cgDirtyBadge').hidden = !dirty;
+  cgEl('cgSaveBtn').disabled  = !dirty;
+}
+
+function cgOpenSettings(opts) {
+  opts = opts || {};
+  if (cg.stage === 'settings') return;
+
+  // انتظر تحميل الملفات المحفوظة قبل ما نفتح
+  if (!cg.filesReady && cg.loadPromise) { cg.loadPromise.then(() => cgOpenSettings(opts)); return; }
+
+  const fromChoose = opts.from === 'choose';
+  if (fromChoose) {
+    if (cg.stage !== 'choose') return;
+    cgEl('cgChoosePopup').classList.remove('active');
+  } else {
+    // فتح مستقل من زر الهيدر: فقط لو ما في بوب آب ثاني مفتوح
+    if (cg.stage || state.activePopup || popupOpen) return;
+    popupOpen = true;                 // يؤجّل بوب آب الإنتيرفال لحد ما نغلق الإعدادات (الطابور يبقى محفوظ)
+  }
+
+  cg.returnTo = fromChoose ? 'choose' : 'standalone';
+  cg.stage = 'settings';
+  state.activePopup = 'cgSettings';
+  cg.draft = cgMakeDraft();
+  cgHideConfirm();
+  cgSetStatus('');
+  cgRenderSettings(true);
+  if (cg.storageErr) cgSetStatus(cgErrMsg(cg.storageErr, 'قراءة الملفات المحفوظة'), 'error');
+
+  cgEnsureOverlay();
+  const pop = cgEl('cgSettingsPopup');
+  cgEl('cgSettingsBody').scrollTop = 0;
+  pop.classList.add('active');
+  pop.focus({ preventScroll: true });
+}
+
+function cgCloseSettings() {
+  cgStopAudio();
+  cgHideConfirm();
+  if (cg.previewUrl) { URL.revokeObjectURL(cg.previewUrl); cg.previewUrl = null; }
+  cg.previewFor = null;
+  cgEl('cgImagePreview').removeAttribute('src');
+  cgEl('cgSettingsPopup').classList.remove('active');
+  cg.draft = null;
+  cg.stage = null;
+
+  if (cg.returnTo === 'choose') {
+    cgShowChooser();                  // نرجع لنافذة الاختيار (والوصف يتحدّث)
+  } else {
+    popupOpen = false;
+    state.activePopup = null;
+    setTimeout(() => {
+      if (popupOpen || cg.stage) return;
+      if (popupQueue.length > 0) drainPopupQueue();
+      else cgEl('overlay').classList.remove('active');
+    }, 380);
+  }
+}
+
+function cgRequestClose() {
+  if (cgIsDirty()) {
+    cgShowConfirm('عندك تغييرات ما انحفظت. وش تبي تسوي؟', [
+      { label: '💾 حفظ وإغلاق', cls: 'primary', fn: async () => { if (await cgSave()) cgCloseSettings(); } },
+      { label: 'تجاهل وإغلاق', cls: 'danger', fn: cgCloseSettings },
+      { label: 'رجوع للتعديل' },
+    ]);
+    return;
+  }
+  cgCloseSettings();
+}
+
+/* ---- اختيار الملفات ---- */
+
+function cgCanDecodeImage(file) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file);
+    const im  = new Image();
+    const done = ok => { URL.revokeObjectURL(url); resolve(ok); };
+    im.onload  = () => done(im.naturalWidth > 0 && im.naturalHeight > 0);
+    im.onerror = () => done(false);
+    im.src = url;
+  });
+}
+
+function cgAudioMime(file) {
+  if (file.type) return file.type;
+  const e = cgExt(file.name);
+  return e === 'mp3' ? 'audio/mpeg' : e === 'wav' ? 'audio/wav' : e === 'ogg' ? 'audio/ogg' : '';
+}
+
+function cgCanLoadAudio(file) {
+  return new Promise(resolve => {
+    const probe = new Audio();
+    const mimes = [file.type, cgAudioMime(file), cgExt(file.name) === 'wav' ? 'audio/wav' : ''].filter(Boolean);
+    if (probe.canPlayType && !mimes.some(m => probe.canPlayType(m))) { resolve(false); return; }   // المتصفح ما يدعم الصيغة
+    const url = URL.createObjectURL(file);
+    const a = new Audio();
+    let finished = false;
+    let timer = null;
+    const done = ok => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      a.removeAttribute('src');
+      try { a.load(); } catch (e) {}
+      URL.revokeObjectURL(url);
+      resolve(ok);
+    };
+    timer = setTimeout(() => done(true), 6000);   // بعض المتصفحات (مثل iOS) ما تحمّل البيانات مسبقًا: نقبل لأن الصيغة مدعومة
+    a.preload = 'metadata';
+    a.addEventListener('loadedmetadata', () => done(true));
+    a.addEventListener('error', () => done(false));
+    a.src = url;
+  });
+}
+
+async function cgHandleImageFile(file) {
+  if (!file || !cg.draft) return;
+  const okType = file.type ? /^image\/(png|jpe?g|webp|gif)$/.test(file.type) : CG_IMAGE_EXT.includes(cgExt(file.name));
+  if (!okType) { cgSetStatus('هذا الملف غير مدعوم. اختر صورة بصيغة PNG أو JPG أو WebP.', 'error'); return; }
+  if (file.size === 0) { cgSetStatus('الملف فارغ.', 'error'); return; }
+  if (file.size > CG_MAX_IMAGE) { cgSetStatus('الصورة كبيرة (' + cgFmtSize(file.size) + '). الحد الأقصى 10 MB.', 'error'); return; }
+  if (!(await cgCanDecodeImage(file))) { cgSetStatus('ما قدرت أقرأ الصورة، ممكن الملف تالف.', 'error'); return; }
+  if (!cg.draft) return;
+  cg.draft.image = { blob: file, name: file.name, type: file.type || '', size: file.size, savedAt: Date.now() };
+  cgRenderSettings(false);
+  cgSetStatus('تم اختيار الصورة. اضغط «حفظ» عشان تنحفظ.', 'info');
+}
+
+async function cgHandleAudioFile(file) {
+  if (!file || !cg.draft) return;
+  const typeOK = /^audio\/(mpeg|mp3|wav|x-wav|wave|ogg)$/.test(file.type) || file.type === 'application/ogg';
+  const extOK  = CG_AUDIO_EXT.includes(cgExt(file.name));
+  if (!typeOK && !extOK) { cgSetStatus('هذا الملف غير مدعوم. اختر ملف صوت بصيغة MP3 أو WAV أو OGG.', 'error'); return; }
+  if (file.size === 0) { cgSetStatus('الملف فارغ.', 'error'); return; }
+  if (file.size > CG_MAX_AUDIO) { cgSetStatus('ملف الصوت كبير (' + cgFmtSize(file.size) + '). الحد الأقصى 25 MB.', 'error'); return; }
+  if (!(await cgCanLoadAudio(file))) { cgSetStatus('متصفحك ما يقدر يشغّل هذا الملف. جرّب MP3 أو WAV.', 'error'); return; }
+  if (!cg.draft) return;
+  cgStopAudio();
+  cg.draft.audio = { blob: file, name: file.name, type: file.type || cgAudioMime(file), size: file.size, savedAt: Date.now() };
+  cgRenderSettings(false);
+  cgSetStatus('تم اختيار الصوت. اضغط «تجربة» لسماعه، ثم «حفظ».', 'info');
+}
+
+function cgPreviewPlay() {
+  const d = cg.draft;
+  if (!d || !d.audio) return;
+  if (d.muted)      { cgSetStatus('الصوت مكتوم. ألغِ الكتم عشان تسمعه.', 'info'); return; }
+  if (d.volume <= 0) { cgSetStatus('مستوى الصوت 0%. ارفعه عشان تسمعه.', 'info'); return; }
+  cgSetStatus('');
+  cgPlayAudio(d.audio, d.volume, {
+    onError:   () => cgSetStatus('ما قدرت أشغّل الصوت.', 'error'),
+    onBlocked: () => cgSetStatus('المتصفح منع التشغيل. اضغط «تجربة» مرة ثانية.', 'error'),
+  });
+}
+
+/* ---- الحفظ والاستعادة ---- */
+
+async function cgSave() {
+  const d = cg.draft;
+  if (!d) return false;
+  const cfg = cgSanitize({ enabled: d.enabled, preferred: d.preferred, text: d.text, volume: d.volume, muted: d.muted, duration: d.duration });
+
+  const changes = {};
+  if (d.image !== cg.files.image) changes.image = d.image;
+  if (d.audio !== cg.files.audio) changes.audio = d.audio;
+  const hasChanges = Object.keys(changes).length > 0;
+
+  if (hasChanges) {
+    if (d.image || d.audio) { try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {} }
+    try {
+      await cgIdbApply(changes);
+    } catch (e) {
+      console.warn('CustomGuilt: فشل حفظ الملفات', e);
+      cgSetStatus(cgErrMsg(e, 'أحفظ الملفات'), 'error');
+      return false;
+    }
+  }
+
+  try {
+    cgWriteConfig(cfg);
+  } catch (e) {
+    console.warn('CustomGuilt: فشل حفظ الإعدادات', e);
+    if (hasChanges) {                                   // تراجع عن الملفات عشان ما يصير تعارض
+      const back = {};
+      Object.keys(changes).forEach(k => { back[k] = cg.files[k]; });
+      try { await cgIdbApply(back); } catch (e2) { console.warn('CustomGuilt: فشل التراجع', e2); }
+    }
+    cgSetStatus(cgErrMsg(e, 'أحفظ الإعدادات'), 'error');
+    return false;
+  }
+
+  cg.cfg   = cfg;
+  cg.files = { image: d.image, audio: d.audio };
+  d.text   = cfg.text;
+  cgRenderSettings(false);
+  cgSetStatus('تم الحفظ ✓', 'success');
+  return true;
+}
+
+function cgAskReset() {
+  cgShowConfirm('بتنحذف الصورة والصوت والنص وترجع الإعدادات للوضع الافتراضي. ما تقدر تتراجع. متأكد؟', [
+    { label: 'نعم، احذف كل شيء', cls: 'danger', fn: cgDoReset },
+    { label: 'تراجع' },
+  ]);
+}
+
+async function cgDoReset() {
+  cgStopAudio();
+  if (cg.files.image || cg.files.audio) {
+    try {
+      await cgIdbApply({ image: null, audio: null });
+    } catch (e) {
+      console.warn('CustomGuilt: فشل الحذف', e);
+      cgSetStatus(cgErrMsg(e, 'أحذف الملفات'), 'error');
+      return;
+    }
+  }
+  try { localStorage.removeItem(CG_LS_KEY); } catch (e) { console.warn('CustomGuilt: فشل حذف الإعدادات', e); }
+  cg.cfg   = { ...CG_DEFAULTS };
+  cg.files = { image: null, audio: null };
+  cg.draft = cgMakeDraft();
+  cgRenderSettings(true);
+  cgSetStatus('تم حذف المحتوى المخصص ورجعت الإعدادات الافتراضية ✓', 'success');
+}
+
+function cgPreviewFull() {
+  const d = cg.draft;
+  if (!d) return;
+  if (!cgHasContent(d, d)) { cgSetStatus('أضف صورة أو صوتًا أو نصًا أول عشان تشوف المعاينة.', 'info'); return; }
+  cgStopAudio();
+  cgHideConfirm();
+  cgEl('cgSettingsPopup').classList.remove('active');
+  cgShowCustom(0, { preview: true });
+}
+
+/* ---------- ربط الأحداث (مرة واحدة فقط) ---------- */
+
+function cgBindEvents() {
+  // اختيار النظام
+  cgEl('cgPickOriginal').addEventListener('click', cgPickOriginal);
+  cgEl('cgPickCustom').addEventListener('click', cgPickCustom);
+  cgEl('cgOpenSettingsBtn').addEventListener('click', () => cgOpenSettings({ from: 'choose' }));
+
+  // عرض النظام المخصص
+  cgEl('cgCustomConfirmBtn').addEventListener('click', () => {
+    if (cg.stage === 'preview') cgClosePreview(); else cgConfirmCustom();
+  });
+  cgEl('cgReplayBtn').addEventListener('click', cgPlayCustomAudio);
+
+  // زر الهيدر
+  cgEl('guiltSettingsBtn').addEventListener('click', () => cgOpenSettings({ from: 'header' }));
+
+  // الإعدادات
+  cgEl('cgCloseBtn').addEventListener('click', cgRequestClose);
+  cgEl('cgCancelBtn').addEventListener('click', cgRequestClose);
+  cgEl('cgSaveBtn').addEventListener('click', () => { cgSave(); });
+  cgEl('cgPreviewBtn').addEventListener('click', cgPreviewFull);
+  cgEl('cgResetBtn').addEventListener('click', cgAskReset);
+
+  cgEl('cgEnabled').addEventListener('change', e => { cg.draft.enabled = e.target.checked; cgRenderSettings(false); });
+  cgEl('cgPreferred').addEventListener('change', e => { cg.draft.preferred = e.target.value; cgRenderSettings(false); });
+  cgEl('cgDuration').addEventListener('change', e => { cg.draft.duration = Number(e.target.value) || 10; cgRenderSettings(false); });
+  cgEl('cgText').addEventListener('input', e => { cg.draft.text = e.target.value; cgRenderSettings(false); });
+
+  cgEl('cgVolume').addEventListener('input', e => {
+    cg.draft.volume = Number(e.target.value);
+    if (cg.audioEl) cg.audioEl.volume = cg.draft.volume / 100;     // تغيير حيّ أثناء التجربة
+    cgRenderSettings(false);
+  });
+  cgEl('cgMute').addEventListener('change', e => {
+    cg.draft.muted = e.target.checked;
+    if (cg.draft.muted) cgStopAudio();
+    cgRenderSettings(false);
+  });
+
+  // الصورة
+  cgEl('cgChooseImageBtn').addEventListener('click', () => cgEl('cgImageInput').click());
+  cgEl('cgImageInput').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';                                           // يسمح باختيار نفس الملف مرة ثانية
+    cgHandleImageFile(f);
+  });
+  cgEl('cgRemoveImageBtn').addEventListener('click', () => {
+    cg.draft.image = null;
+    cgRenderSettings(false);
+    cgSetStatus('تم حذف الصورة من التعديلات. اضغط «حفظ» لتثبيت الحذف.', 'info');
+  });
+
+  // الصوت
+  cgEl('cgChooseAudioBtn').addEventListener('click', () => cgEl('cgAudioInput').click());
+  cgEl('cgAudioInput').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    cgHandleAudioFile(f);
+  });
+  cgEl('cgRemoveAudioBtn').addEventListener('click', () => {
+    cgStopAudio();
+    cg.draft.audio = null;
+    cgRenderSettings(false);
+    cgSetStatus('تم حذف الصوت من التعديلات. اضغط «حفظ» لتثبيت الحذف.', 'info');
+  });
+  cgEl('cgPlayBtn').addEventListener('click', cgPreviewPlay);
+  cgEl('cgStopBtn').addEventListener('click', cgStopAudio);
+
+  // تنبيه لو حاول يغلق الصفحة وفي تعديلات غير محفوظة
+  window.addEventListener('beforeunload', e => {
+    if (cgIsDirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+}
+
+/* ---- الكيبورد: يعمل فقط أثناء ظهور نوافذ النظام المخصص، ويمنع اختصارات الصفحة من التداخل ---- */
+document.addEventListener('keydown', e => {
+  if (!cg.stage) return;
+  switch (cg.stage) {
+    case 'choose':
+      if (e.key === '1') { e.preventDefault(); cgPickOriginal(); }
+      else if (e.key === '2') { e.preventDefault(); cgPickCustom(); }
+      break;
+    case 'custom':
+      if (e.target && e.target.id === 'cgReplayBtn') break;       // خله يشتغل كزر عادي
+      if (e.key === 'Enter' || e.code === 'Space') { e.preventDefault(); cgConfirmCustom(); }
+      break;
+    case 'preview':
+      if (e.key === 'Escape' || e.key === 'Enter' || e.code === 'Space') { e.preventDefault(); cgClosePreview(); }
+      break;
+    case 'settings':
+      if (e.key === 'Escape') { e.preventDefault(); cgRequestClose(); }
+      break;
+  }
+  e.stopImmediatePropagation();       // لا تدع اختصارات الصفحة (Q, T, 1-6 ...) تشتغل خلف النافذة
+}, true);
+
+function cgInit() {
+  if (cg.inited) return;
+  cg.inited = true;
+  cgLoadConfig();
+  cg.loadPromise = cgIdbLoad()
+    .then(f => { cg.files = f; })
+    .catch(e => {
+      console.warn('CustomGuilt: تعذّر قراءة الملفات المحفوظة', e);
+      cg.storageErr = e;
+      cg.files = { image: null, audio: null };
+    })
+    .then(() => { cg.filesReady = true; });
+  cgBindEvents();
+}
+
+document.addEventListener('DOMContentLoaded', cgInit);
+
 
 // ==========================================
 // 📋 نظام الخطة اليومية — من الصفر
