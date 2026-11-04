@@ -25,6 +25,7 @@
       <button class="icon-btn" id="themeToggle">🌙 <kbd>T</kbd></button>
       <button class="icon-btn" id="exportBtn">📤 <kbd>E</kbd></button>
       <button class="icon-btn" id="helpBtn">⌨️ <kbd>H</kbd></button>
+      <button class="icon-btn" id="guiltSettingsBtn" type="button" title="تخصيص ضربة الضمير" aria-label="تخصيص ضربة الضمير">🎭</button>
     </div>
   </header>
 
@@ -683,6 +684,148 @@
       <button class="guilt-confirm-btn" id="guiltConfirmBtn">
         سجّل التسخيت وكمّل <kbd>Enter</kbd>
       </button>
+    </div>
+  </div>
+
+  <!-- ====== Custom Guilt System: اختيار النظام ====== -->
+  <div class="popup cg-popup cg-choose-popup" id="cgChoosePopup" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="cgChooseTitle">
+    <div class="cg-choose-icon">💀</div>
+    <h2 class="cg-choose-title" id="cgChooseTitle">ضربة الضمير</h2>
+    <p class="cg-choose-sub">اختر النظام اللي تبي تشغّله</p>
+
+    <div class="cg-choose-grid">
+      <button class="cg-choice cg-choice-original" id="cgPickOriginal" type="button">
+        <span class="cg-choice-emoji">😬</span>
+        <span class="cg-choice-name">النظام الأصلي</span>
+        <span class="cg-choice-en" dir="ltr">Original Guilt System</span>
+        <span class="cg-choice-desc">رسائل وعدّاد ضربة الضمير كما هي</span>
+        <kbd>1</kbd>
+      </button>
+      <button class="cg-choice cg-choice-custom" id="cgPickCustom" type="button">
+        <span class="cg-choice-emoji">🎭</span>
+        <span class="cg-choice-name">النظام المخصص</span>
+        <span class="cg-choice-en" dir="ltr">Custom Guilt System</span>
+        <span class="cg-choice-desc" id="cgPickCustomDesc"></span>
+        <kbd>2</kbd>
+      </button>
+    </div>
+
+    <label class="cg-remember">
+      <input type="checkbox" id="cgRemember">
+      <span>تذكّر اختياري واستخدمه تلقائيًا في المرات الجاية</span>
+    </label>
+
+    <button class="cg-link-btn" id="cgOpenSettingsBtn" type="button">⚙️ تخصيص <small dir="ltr">Customize</small></button>
+  </div>
+
+  <!-- ====== Custom Guilt System: عرض النظام المخصص ====== -->
+  <div class="popup cg-popup cg-custom-popup" id="cgCustomPopup" tabindex="-1" role="dialog" aria-modal="true" aria-label="ضربة الضمير المخصصة">
+    <div class="cg-custom-scroll" id="cgCustomScroll">
+      <div class="cg-preview-badge" id="cgPreviewBadge" hidden>👁 معاينة فقط — لن يُسجَّل شيء</div>
+      <img class="cg-custom-img" id="cgCustomImg" alt="" hidden>
+      <div class="cg-custom-text" id="cgCustomText" hidden></div>
+      <button class="cg-btn cg-replay-btn" id="cgReplayBtn" type="button" hidden>🔊 اضغط لتشغيل الصوت</button>
+    </div>
+    <div class="cg-custom-foot">
+      <div class="cg-countdown" id="cgCountdownBox">
+        <div class="cg-bar"><div class="cg-bar-fill" id="cgCustomBar"></div></div>
+        <div class="cg-count-line" id="cgCustomCount"></div>
+      </div>
+      <div class="guilt-actions">
+        <button class="guilt-confirm-btn" id="cgCustomConfirmBtn" type="button"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Custom Guilt System: إعدادات التخصيص ====== -->
+  <div class="popup cg-popup cg-settings-popup" id="cgSettingsPopup" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="cgSettingsTitle">
+    <div class="cg-s-header">
+      <h2 id="cgSettingsTitle">🎭 تخصيص ضربة الضمير <small dir="ltr">Custom Guilt System</small></h2>
+      <button class="cg-x" id="cgCloseBtn" type="button" aria-label="إغلاق">✕</button>
+    </div>
+
+    <div class="cg-s-body" id="cgSettingsBody">
+      <div class="cg-confirm-bar" id="cgConfirmBar" hidden>
+        <div class="cg-confirm-msg" id="cgConfirmMsg"></div>
+        <div class="cg-confirm-btns" id="cgConfirmBtns"></div>
+      </div>
+      <div class="cg-status" id="cgStatus" role="status" aria-live="polite" hidden></div>
+
+      <section class="cg-sec">
+        <label class="cg-switch-row" for="cgEnabled">
+          <span>تفعيل النظام المخصص</span>
+          <input type="checkbox" id="cgEnabled">
+        </label>
+        <div class="cg-field">
+          <label for="cgPreferred">لما تظهر ضربة الضمير</label>
+          <select id="cgPreferred">
+            <option value="ask">اسألني كل مرة</option>
+            <option value="original">شغّل الأصلي تلقائيًا</option>
+            <option value="custom">شغّل المخصص تلقائيًا</option>
+          </select>
+        </div>
+        <div class="cg-field">
+          <label for="cgDuration">مدة عرض النظام المخصص (بعدها يُسجَّل التسخيت تلقائيًا)</label>
+          <select id="cgDuration">
+            <option value="10">10 ثواني</option>
+            <option value="20">20 ثانية</option>
+            <option value="30">30 ثانية</option>
+            <option value="60">60 ثانية</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="cg-sec">
+        <h3>🖼 الصورة</h3>
+        <input type="file" id="cgImageInput" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" hidden>
+        <div class="cg-row">
+          <button class="cg-btn" id="cgChooseImageBtn" type="button">🖼 اختيار صورة <small dir="ltr">Choose Image</small></button>
+          <button class="cg-btn cg-btn-danger" id="cgRemoveImageBtn" type="button">🗑 حذف</button>
+        </div>
+        <div class="cg-file-name" id="cgImageName"></div>
+        <div class="cg-img-preview" id="cgImagePreviewWrap" hidden>
+          <img id="cgImagePreview" alt="معاينة الصورة المختارة">
+        </div>
+      </section>
+
+      <section class="cg-sec">
+        <h3>🔊 الصوت</h3>
+        <input type="file" id="cgAudioInput" accept="audio/mpeg,audio/wav,audio/x-wav,audio/ogg,.mp3,.wav,.ogg" hidden>
+        <div class="cg-row">
+          <button class="cg-btn" id="cgChooseAudioBtn" type="button">🎵 اختيار صوت <small dir="ltr">Choose Audio</small></button>
+          <button class="cg-btn cg-btn-danger" id="cgRemoveAudioBtn" type="button">🗑 حذف</button>
+        </div>
+        <div class="cg-file-name" id="cgAudioName"></div>
+        <div class="cg-row">
+          <button class="cg-btn" id="cgPlayBtn" type="button">▶ تجربة <small dir="ltr">Play Preview</small></button>
+          <button class="cg-btn" id="cgStopBtn" type="button">⏹ إيقاف <small dir="ltr">Stop</small></button>
+        </div>
+        <div class="cg-vol-row">
+          <label for="cgVolume">مستوى الصوت</label>
+          <input type="range" id="cgVolume" min="0" max="100" step="1" value="100">
+          <output id="cgVolumeOut" for="cgVolume">100%</output>
+        </div>
+        <label class="cg-check-row" for="cgMute">
+          <input type="checkbox" id="cgMute">
+          <span>كتم الصوت (يبقى الملف محفوظ)</span>
+        </label>
+      </section>
+
+      <section class="cg-sec">
+        <h3>✍️ النص</h3>
+        <textarea id="cgText" rows="5" dir="auto" maxlength="2000" placeholder="اكتب رسالتك هنا..." aria-label="نص الرسالة"></textarea>
+        <div class="cg-counter"><span id="cgTextCount">0</span> / 2000</div>
+      </section>
+    </div>
+
+    <div class="cg-s-footer">
+      <span class="cg-dirty" id="cgDirtyBadge" hidden>● تغييرات غير محفوظة</span>
+      <div class="cg-footer-btns">
+        <button class="cg-btn cg-btn-primary" id="cgSaveBtn" type="button">💾 حفظ <small dir="ltr">Save Changes</small></button>
+        <button class="cg-btn" id="cgPreviewBtn" type="button">👁 معاينة كاملة</button>
+        <button class="cg-btn" id="cgCancelBtn" type="button">إلغاء</button>
+        <button class="cg-btn cg-btn-danger" id="cgResetBtn" type="button">↺ استعادة الافتراضي</button>
+      </div>
     </div>
   </div>
 
