@@ -1707,18 +1707,22 @@ document.addEventListener('DOMContentLoaded', () => {
 // ==========================================
 
 const CG_LS_KEY     = 'waqti_customGuilt';
+const CG_LAST_KEY   = 'waqti_customGuilt_last';   // آخر عناصر ظهرت (لمنع التكرار)
 const CG_DB_NAME    = 'waqti_custom_guilt';
-const CG_DB_STORE   = 'files';
-const CG_MAX_IMAGE  = 10 * 1024 * 1024;   // 10 ميجا
-const CG_MAX_AUDIO  = 25 * 1024 * 1024;   // 25 ميجا
+const CG_DB_VER     = 2;
+const CG_DB_STORE   = 'items';                    // الإصدار 2: عدة ملفات (الإصدار 1 كان ملف صورة وملف صوت فقط)
+const CG_DB_OLD     = 'files';
+const CG_MAX_IMAGE  = 10 * 1024 * 1024;   // 10 ميجا للصورة الواحدة
+const CG_MAX_AUDIO  = 25 * 1024 * 1024;   // 25 ميجا للصوت الواحد
 const CG_MAX_TEXT   = 2000;
 const CG_IMAGE_EXT  = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
 const CG_AUDIO_EXT  = ['mp3', 'wav', 'ogg'];
-const CG_DEFAULTS   = { enabled: true, preferred: 'ask', text: '', volume: 100, muted: false, duration: 10 };
+const CG_DEFAULTS   = { enabled: true, preferred: 'ask', volume: 100, muted: false, duration: 10 };
 
 const cg = {
-  cfg:         { ...CG_DEFAULTS },
-  files:       { image: null, audio: null },   // السجلات المحفوظة: {blob, name, type, size}
+  cfg:         { ...CG_DEFAULTS, texts: [] },     // texts: [{id, text}]
+  items:       { image: [], audio: [] },          // السجلات المحفوظة: {id, kind, blob, name, type, size, addedAt}
+  last:        { image: null, audio: null, text: null },
   filesReady:  false,
   loadPromise: null,
   dbPromise:   null,
@@ -1733,19 +1737,23 @@ const cg = {
   customSrc:   null,
   customUrls:  [],
   // الإعدادات
-  draft:       null,
+  draft:       null,      // { enabled, preferred, volume, muted, duration, texts, images, audios }
   returnTo:    null,      // 'choose' | 'standalone'
-  previewFor:  null,
-  previewUrl:  null,
+  thumbUrls:   {},
   statusTimer: null,
   // الصوت
   audioEl:     null,
   audioUrl:    null,
+  audioId:     null,
 };
 
 function cgEl(id) { return document.getElementById(id); }
 
 /* ---------- الإعدادات (localStorage) ---------- */
+
+function cgNewId() {
+  return 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
 
 function cgSanitize(r) {
   const d = CG_DEFAULTS;
@@ -1754,20 +1762,36 @@ function cgSanitize(r) {
     v = Number(v);
     return Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : def;
   };
+  let texts = [];
+  if (Array.isArray(r.texts)) {
+    texts = r.texts
+      .filter(t => t && typeof t.text === 'string' && t.text.trim())
+      .map(t => ({ id: (typeof t.id === 'string' && t.id) ? t.id : cgNewId(), text: t.text.slice(0, CG_MAX_TEXT) }));
+  } else if (typeof r.text === 'string' && r.text.trim()) {
+    texts = [{ id: cgNewId(), text: r.text.slice(0, CG_MAX_TEXT) }];      // ترحيل النص الواحد القديم
+  }
   return {
     enabled:   typeof r.enabled === 'boolean' ? r.enabled : d.enabled,
     preferred: ['ask', 'original', 'custom'].includes(r.preferred) ? r.preferred : d.preferred,
-    text:      typeof r.text === 'string' ? r.text.slice(0, CG_MAX_TEXT) : d.text,
     volume:    num(r.volume, 0, 100, d.volume),
     muted:     typeof r.muted === 'boolean' ? r.muted : d.muted,
     duration:  [10, 20, 30, 60].includes(Number(r.duration)) ? Number(r.duration) : d.duration,
+    texts,
   };
 }
 
 function cgLoadConfig() {
   let raw = null;
   try { raw = JSON.parse(localStorage.getItem(CG_LS_KEY) || 'null'); } catch (e) { raw = null; }
+  const legacy = !!(raw && typeof raw === 'object' && !Array.isArray(raw.texts) && 'text' in raw);
   cg.cfg = cgSanitize(raw);
+  if (legacy) {                       // نكتب الصيغة الجديدة مرة واحدة (والنص القديم محفوظ ضمن العبارات)
+    try { cgWriteConfig(cg.cfg); } catch (e) { console.warn('CustomGuilt: تعذّر ترحيل الإعدادات', e); }
+  }
+  try {
+    const l = JSON.parse(localStorage.getItem(CG_LAST_KEY) || 'null');
+    if (l && typeof l === 'object') cg.last = { image: l.image || null, audio: l.audio || null, text: l.text || null };
+  } catch (e) {}
 }
 
 /** يكتب الإعدادات في localStorage — يرمي خطأ لو فشل */
@@ -1780,6 +1804,10 @@ function cgSetPreferred(mode) {
   try { cgWriteConfig(next); cg.cfg = next; } catch (e) { console.warn('CustomGuilt: تعذّر حفظ الاختيار', e); }
 }
 
+function cgSaveLast() {
+  try { localStorage.setItem(CG_LAST_KEY, JSON.stringify(cg.last)); } catch (e) {}
+}
+
 /* ---------- الملفات (IndexedDB) ---------- */
 
 function cgOpenDB() {
@@ -1787,9 +1815,26 @@ function cgOpenDB() {
   cg.dbPromise = new Promise((resolve, reject) => {
     if (!window.indexedDB) { reject(new Error('NO_IDB')); return; }
     let req;
-    try { req = indexedDB.open(CG_DB_NAME, 1); } catch (e) { reject(e); return; }
-    req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains(CG_DB_STORE)) req.result.createObjectStore(CG_DB_STORE);
+    try { req = indexedDB.open(CG_DB_NAME, CG_DB_VER); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = ev => {
+      const db = req.result, tx = req.transaction;
+      const store = db.objectStoreNames.contains(CG_DB_STORE) ? tx.objectStore(CG_DB_STORE) : db.createObjectStore(CG_DB_STORE, { keyPath: 'id' });
+      // ترحيل ملفات الإصدار 1 (صورة واحدة + صوت واحد) إلى الصيغة الجديدة — داخل نفس العملية، فلو فشل شيء ما يضيع شيء
+      if (ev.oldVersion >= 1 && db.objectStoreNames.contains(CG_DB_OLD)) {
+        const cur = tx.objectStore(CG_DB_OLD).openCursor();
+        cur.onsuccess = () => {
+          const c = cur.result;
+          if (c) {
+            const v = c.value, k = c.key;
+            if ((k === 'image' || k === 'audio') && v && v.blob instanceof Blob) {
+              store.put({ id: 'mig_' + k, kind: k, blob: v.blob, name: v.name || k, type: v.type || '', size: v.size || v.blob.size, addedAt: v.savedAt || Date.now() });
+            }
+            c.continue();
+          } else {
+            db.deleteObjectStore(CG_DB_OLD);
+          }
+        };
+      }
     };
     req.onsuccess = () => {
       const db = req.result;
@@ -1797,32 +1842,33 @@ function cgOpenDB() {
       resolve(db);
     };
     req.onerror   = () => reject(req.error || new Error('IDB_OPEN'));
-    req.onblocked = () => reject(new Error('IDB_BLOCKED'));
+    req.onblocked = () => console.warn('CustomGuilt: قاعدة البيانات مفتوحة في تبويب آخر، سيكتمل التحديث عند إغلاقه');
   });
   cg.dbPromise.catch(() => { cg.dbPromise = null; });
   return cg.dbPromise;
 }
 
 function cgValidRecord(r) {
-  return (r && r.blob instanceof Blob && r.blob.size > 0) ? r : null;
+  return (r && typeof r.id === 'string' && (r.kind === 'image' || r.kind === 'audio') && r.blob instanceof Blob && r.blob.size > 0) ? r : null;
 }
 
 async function cgIdbLoad() {
   const db = await cgOpenDB();
   return new Promise((resolve, reject) => {
     const tx  = db.transaction(CG_DB_STORE, 'readonly');
-    const st  = tx.objectStore(CG_DB_STORE);
-    const out = { image: null, audio: null };
-    const r1  = st.get('image');
-    const r2  = st.get('audio');
-    r1.onsuccess = () => { out.image = cgValidRecord(r1.result); };
-    r2.onsuccess = () => { out.audio = cgValidRecord(r2.result); };
+    const req = tx.objectStore(CG_DB_STORE).getAll();
+    const out = { image: [], audio: [] };
+    req.onsuccess = () => {
+      (req.result || []).map(cgValidRecord).filter(Boolean).forEach(r => out[r.kind].push(r));
+      out.image.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+      out.audio.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+    };
     tx.oncomplete = () => resolve(out);
     tx.onerror = tx.onabort = () => reject(tx.error || new Error('IDB_READ'));
   });
 }
 
-/** changes = { image?: record|null, audio?: record|null } — null يعني احذف، غير موجود يعني ما تغيّر */
+/** changes = { put?: [records], del?: [ids] } — عملية واحدة: إما كلها تنجح أو ولا شيء */
 async function cgIdbApply(changes) {
   const db = await cgOpenDB();
   return new Promise((resolve, reject) => {
@@ -1830,10 +1876,8 @@ async function cgIdbApply(changes) {
     try { tx = db.transaction(CG_DB_STORE, 'readwrite'); } catch (e) { reject(e); return; }
     const st = tx.objectStore(CG_DB_STORE);
     try {
-      ['image', 'audio'].forEach(k => {
-        if (!(k in changes)) return;
-        if (changes[k] === null) st.delete(k); else st.put(changes[k], k);
-      });
+      (changes.del || []).forEach(id => st.delete(id));
+      (changes.put || []).forEach(r => st.put(r));
     } catch (e) {
       try { tx.abort(); } catch (_) {}
       reject(e);
@@ -1849,18 +1893,27 @@ function cgErrMsg(e, what) {
   const name = (e && e.name) || '';
   const msg  = (e && e.message) || '';
   if (name === 'QuotaExceededError' || /quota/i.test(msg)) {
-    return 'مساحة التخزين في المتصفح ممتلئة، فما قدرت ' + what + '. احذف ملفات ثانية أو اختر ملفًا أصغر.';
+    return 'مساحة التخزين في المتصفح ممتلئة، فما قدرت ' + what + '. احذف ملفات ثانية أو اختر ملفات أصغر.';
   }
   if (msg === 'NO_IDB' || name === 'SecurityError' || name === 'InvalidStateError' || msg === 'IDB_BLOCKED') {
-    return 'المتصفح ما يسمح بتخزين الملفات محليًا (ممكن بسبب التصفح الخاص أو منع التخزين). النص والإعدادات تنحفظ، لكن الصورة والصوت لا.';
+    return 'المتصفح ما يسمح بتخزين الملفات محليًا (ممكن بسبب التصفح الخاص أو منع التخزين). العبارات والإعدادات تنحفظ، لكن الصور والأصوات لا.';
   }
   return 'صار خطأ وما قدرت ' + what + '. جرّب مرة ثانية.';
 }
 
 /* ---------- أدوات صغيرة ---------- */
 
-function cgHasContent(c, f) {
-  return !!(((c && c.text) || '').trim() || (f && f.image) || (f && f.audio));
+/** عدد العناصر في كل قسم (مصدر: الإعدادات المحفوظة أو المسودة) */
+function cgCounts(src) {
+  const i = src ? src.images : cg.items.image;
+  const a = src ? src.audios : cg.items.audio;
+  const t = src ? src.texts.filter(x => x.text.trim()) : cg.cfg.texts;
+  return { i: i.length, a: a.length, t: t.length };
+}
+
+function cgHasContent(src) {
+  const c = cgCounts(src);
+  return (c.i + c.a + c.t) > 0;
 }
 
 function cgFmtSize(bytes) {
@@ -1871,11 +1924,21 @@ function cgFmtSize(bytes) {
 function cgExt(name) { return ((name || '').split('.').pop() || '').toLowerCase(); }
 
 function cgSummary() {
+  const c = cgCounts();
   const parts = [];
-  if (cg.files.image) parts.push('🖼 صورة');
-  if (cg.files.audio) parts.push('🔊 صوت');
-  if ((cg.cfg.text || '').trim()) parts.push('✍️ نص');
+  if (c.i) parts.push('🖼 ' + c.i);
+  if (c.a) parts.push('🔊 ' + c.a);
+  if (c.t) parts.push('✍️ ' + c.t);
   return parts.join(' · ');
+}
+
+/** اختيار عشوائي من قائمة، مع تجنب آخر عنصر ظهر (لو في أكثر من عنصر) */
+function cgPick(list, lastId) {
+  if (!list || !list.length) return null;
+  if (list.length === 1) return list[0];
+  const pool = list.filter(x => x.id !== lastId);
+  const arr = pool.length ? pool : list;
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 /** يتأكد إن الخلفية الداكنة ظاهرة (البوب آب الأصلي يخفيها بعد 380ms، فنعيدها بعده مباشرة) */
@@ -1897,6 +1960,7 @@ function cgStopAudio() {
   if (cg.audioUrl) URL.revokeObjectURL(cg.audioUrl);
   cg.audioEl  = null;
   cg.audioUrl = null;
+  cg.audioId  = null;
   cgSyncAudioButtons();
 }
 
@@ -1912,6 +1976,7 @@ function cgPlayAudio(rec, volume, cb) {
   a.addEventListener('error', () => { if (cg.audioEl === a) { cgStopAudio(); if (cb.onError) cb.onError(); } });
   cg.audioEl  = a;
   cg.audioUrl = url;
+  cg.audioId  = rec.id || null;
   a.src = url;
   const p = a.play();
   if (p && typeof p.catch === 'function') {
@@ -1946,7 +2011,7 @@ function openGuiltFlow(durationMinutes) {
 
   const c = cg.cfg;
   if (!c.enabled || c.preferred === 'original') { showGuiltPopup(durationMinutes); return; }
-  if (c.preferred === 'custom' && cgHasContent(c, cg.files)) { cgShowCustom(durationMinutes); return; }
+  if (c.preferred === 'custom' && cgHasContent()) { cgShowCustom(durationMinutes); return; }
   cgShowChooser();
 }
 
@@ -1955,7 +2020,7 @@ function openGuiltFlow(durationMinutes) {
 function cgShowChooser() {
   cg.stage = 'choose';
   state.activePopup = 'cgChoose';
-  const has = cgHasContent(cg.cfg, cg.files);
+  const has = cgHasContent();
   cgEl('cgPickCustomDesc').textContent = has ? cgSummary() : 'لسه ما جهّزته — اضغط لإعداده';
   cgEl('cgRemember').checked = false;
   cgEnsureOverlay();
@@ -1975,7 +2040,7 @@ function cgPickOriginal() {
 
 function cgPickCustom() {
   if (cg.stage !== 'choose') return;
-  if (!cgHasContent(cg.cfg, cg.files)) { cgOpenSettings({ from: 'choose' }); return; }
+  if (!cgHasContent()) { cgOpenSettings({ from: 'choose' }); return; }
   if (cgEl('cgRemember').checked) cgSetPreferred('custom');
   cgEl('cgChoosePopup').classList.remove('active');
   cgShowCustom(cg.pendingDur);
@@ -2014,9 +2079,19 @@ function cgPlayCustomAudio() {
 
 function cgShowCustom(dur, opts) {
   const preview = !!(opts && opts.preview);
-  const src = preview
-    ? { text: cg.draft.text, volume: cg.draft.volume, muted: cg.draft.muted, duration: cg.draft.duration, image: cg.draft.image, audio: cg.draft.audio }
-    : { text: cg.cfg.text,   volume: cg.cfg.volume,   muted: cg.cfg.muted,   duration: cg.cfg.duration,   image: cg.files.image,  audio: cg.files.audio };
+  const d = preview ? cg.draft : null;
+
+  // اختيار عشوائي جديد في كل مرة — الصورة والصوت والعبارة مستقلة عن بعضها،
+  // ولا يتكرر نفس العنصر مرتين متتاليتين إذا كان في أكثر من عنصر
+  const pickImg = cgPick(preview ? d.images : cg.items.image, preview ? null : cg.last.image);
+  const pickAud = cgPick(preview ? d.audios : cg.items.audio, preview ? null : cg.last.audio);
+  const pickTxt = cgPick(preview ? d.texts.filter(t => t.text.trim()) : cg.cfg.texts, preview ? null : cg.last.text);
+  if (!preview) {
+    cg.last = { image: pickImg ? pickImg.id : null, audio: pickAud ? pickAud.id : null, text: pickTxt ? pickTxt.id : null };
+    cgSaveLast();
+  }
+  const base = preview ? d : cg.cfg;
+  const src = { text: pickTxt ? pickTxt.text : '', image: pickImg, audio: pickAud, volume: base.volume, muted: base.muted, duration: base.duration };
 
   cgCleanupCustom(true);
   cg.customSrc = src;
@@ -2082,8 +2157,9 @@ function cgCleanupCustom(keepDom) {
   clearInterval(cg.customTick);
   cg.customTick = null;
   cgStopAudio();
-  cg.customUrls.forEach(u => URL.revokeObjectURL(u));
+  const urls = cg.customUrls;                       // نؤخّر إلغاء الروابط قليلًا حتى لا نقطع تحميل صورة لسه بتظهر
   cg.customUrls = [];
+  setTimeout(() => urls.forEach(u => URL.revokeObjectURL(u)), 700);
   cg.customSrc  = null;
   if (!keepDom) {
     // نمسح المحتوى بعد ما تختفي النافذة (عشان ما يقفز الشكل أثناء الإغلاق)
@@ -2126,15 +2202,24 @@ function cgClosePreview() {
 /* ---------- نافذة الإعدادات ---------- */
 
 function cgMakeDraft() {
-  return { ...cg.cfg, image: cg.files.image, audio: cg.files.audio };
+  return {
+    enabled: cg.cfg.enabled, preferred: cg.cfg.preferred, volume: cg.cfg.volume, muted: cg.cfg.muted, duration: cg.cfg.duration,
+    texts:  cg.cfg.texts.map(t => ({ ...t })),
+    images: cg.items.image.slice(),
+    audios: cg.items.audio.slice(),
+  };
 }
+
+const cgIds = list => list.map(x => x.id).join('|');
+const cgTextSig = list => list.filter(t => t.text.trim()).map(t => t.id + '\u0000' + t.text).join('\u0001');
 
 function cgIsDirty() {
   if (!cg.draft || (cg.stage !== 'settings' && cg.stage !== 'preview')) return false;
   const d = cg.draft, c = cg.cfg;
-  return d.enabled !== c.enabled || d.preferred !== c.preferred || d.text !== c.text ||
-         d.volume !== c.volume || d.muted !== c.muted || d.duration !== c.duration ||
-         d.image !== cg.files.image || d.audio !== cg.files.audio;
+  return d.enabled !== c.enabled || d.preferred !== c.preferred || d.volume !== c.volume ||
+         d.muted !== c.muted || d.duration !== c.duration ||
+         cgTextSig(d.texts) !== cgTextSig(c.texts) ||
+         cgIds(d.images) !== cgIds(cg.items.image) || cgIds(d.audios) !== cgIds(cg.items.audio);
 }
 
 function cgSetStatus(msg, type) {
@@ -2145,7 +2230,7 @@ function cgSetStatus(msg, type) {
   box.className = 'cg-status ' + (type || 'info');
   box.hidden = false;
   cgEl('cgSettingsBody').scrollTop = 0;
-  if (type !== 'error') cg.statusTimer = setTimeout(() => { box.hidden = true; }, 6000);
+  if (type !== 'error') cg.statusTimer = setTimeout(() => { box.hidden = true; }, 7000);
 }
 
 function cgShowConfirm(msg, actions) {
@@ -2169,14 +2254,122 @@ function cgHideConfirm() {
   cgEl('cgConfirmBtns').replaceChildren();
 }
 
+/** يحدّث شكل أزرار التجربة (▶ / ⏹) حسب الصوت الجاري */
 function cgSyncAudioButtons() {
-  const play = cgEl('cgPlayBtn');
-  if (!play || !cg.draft) return;
-  play.disabled = !cg.draft.audio;
-  cgEl('cgStopBtn').disabled = !cg.audioEl;
+  document.querySelectorAll('#cgAudioList .cg-play').forEach(b => {
+    const on = cg.audioId === b.dataset.id;
+    b.textContent = on ? '⏹' : '▶';
+    b.title = on ? 'إيقاف' : 'تجربة';
+    b.setAttribute('aria-label', on ? 'إيقاف الصوت' : 'تجربة الصوت');
+    b.classList.toggle('playing', on);
+  });
 }
 
-function cgRenderSettings(syncInputs) {
+/* ---- رسم القوائم (صور / أصوات / عبارات) ---- */
+
+function cgRenderImages() {
+  const d = cg.draft, box = cgEl('cgImageList');
+  const keep = new Set(d.images.map(r => r.id));
+  Object.keys(cg.thumbUrls).forEach(id => {
+    if (!keep.has(id)) { URL.revokeObjectURL(cg.thumbUrls[id]); delete cg.thumbUrls[id]; }
+  });
+  box.replaceChildren();
+  d.images.forEach(r => {
+    if (!cg.thumbUrls[r.id]) cg.thumbUrls[r.id] = URL.createObjectURL(r.blob);
+    const wrap = document.createElement('div');
+    wrap.className = 'cg-thumb';
+    const img = document.createElement('img');
+    img.src = cg.thumbUrls[r.id];
+    img.alt = r.name;
+    img.title = r.name + ' (' + cgFmtSize(r.size) + ')';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'cg-thumb-del';
+    del.dataset.act = 'del-image';
+    del.dataset.id = r.id;
+    del.title = 'حذف الصورة';
+    del.setAttribute('aria-label', 'حذف الصورة ' + r.name);
+    del.textContent = '✕';
+    wrap.append(img, del);
+    box.appendChild(wrap);
+  });
+  box.hidden = d.images.length === 0;
+  cgEl('cgImageEmpty').hidden = d.images.length > 0;
+}
+
+function cgRenderAudios() {
+  const d = cg.draft, box = cgEl('cgAudioList');
+  box.replaceChildren();
+  d.audios.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'cg-audio-item';
+    const play = document.createElement('button');
+    play.type = 'button';
+    play.className = 'cg-btn cg-play';
+    play.dataset.act = 'play-audio';
+    play.dataset.id = r.id;
+    const meta = document.createElement('div');
+    meta.className = 'cg-audio-meta';
+    const nm = document.createElement('span');
+    nm.textContent = r.name;
+    const sz = document.createElement('small');
+    sz.textContent = cgFmtSize(r.size);
+    meta.append(nm, sz);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'cg-btn cg-btn-danger';
+    del.dataset.act = 'del-audio';
+    del.dataset.id = r.id;
+    del.title = 'حذف الصوت';
+    del.setAttribute('aria-label', 'حذف الصوت ' + r.name);
+    del.textContent = '🗑';
+    row.append(play, meta, del);
+    box.appendChild(row);
+  });
+  box.hidden = d.audios.length === 0;
+  cgEl('cgAudioEmpty').hidden = d.audios.length > 0;
+  cgSyncAudioButtons();
+}
+
+function cgRenderTexts() {
+  const d = cg.draft, box = cgEl('cgTextList');
+  box.replaceChildren();
+  d.texts.forEach(t => {
+    const row = document.createElement('div');
+    row.className = 'cg-text-item';
+    const ta = document.createElement('textarea');
+    ta.dir = 'auto';
+    ta.rows = 2;
+    ta.maxLength = CG_MAX_TEXT;
+    ta.placeholder = 'اكتب عبارة...';
+    ta.setAttribute('aria-label', 'عبارة');
+    ta.dataset.id = t.id;
+    ta.value = t.text;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'cg-btn cg-btn-danger';
+    del.dataset.act = 'del-text';
+    del.dataset.id = t.id;
+    del.title = 'حذف العبارة';
+    del.setAttribute('aria-label', 'حذف العبارة');
+    del.textContent = '🗑';
+    row.append(ta, del);
+    box.appendChild(row);
+  });
+  box.hidden = d.texts.length === 0;
+  cgEl('cgTextEmpty').hidden = d.texts.length > 0;
+}
+
+function cgRenderLists() {
+  cgRenderImages();
+  cgRenderAudios();
+  cgRenderTexts();
+}
+
+/** يحدّث الحقول العامة والعدّادات وحالة التعديلات (بدون إعادة رسم القوائم) */
+function cgRenderSettings() {
   const d = cg.draft;
   if (!d) return;
   cgEl('cgEnabled').checked   = d.enabled;
@@ -2185,28 +2378,12 @@ function cgRenderSettings(syncInputs) {
   cgEl('cgVolume').value      = d.volume;
   cgEl('cgVolumeOut').textContent = d.volume + '%';
   cgEl('cgMute').checked      = d.muted;
-  if (syncInputs) cgEl('cgText').value = d.text;
-  cgEl('cgTextCount').textContent = d.text.length;
 
-  // الصورة + المعاينة
-  const wrap = cgEl('cgImagePreviewWrap');
-  const img  = cgEl('cgImagePreview');
-  if (cg.previewFor !== d.image) {
-    if (cg.previewUrl) { URL.revokeObjectURL(cg.previewUrl); cg.previewUrl = null; }
-    cg.previewFor = d.image;
-    if (d.image) { cg.previewUrl = URL.createObjectURL(d.image.blob); img.src = cg.previewUrl; }
-    else img.removeAttribute('src');
-  }
-  wrap.hidden = !d.image;
-  cgEl('cgImageName').textContent = d.image ? d.image.name + ' (' + cgFmtSize(d.image.size) + ')' : 'لم تُختر صورة';
-  cgEl('cgRemoveImageBtn').disabled = !d.image;
+  const c = cgCounts(d);
+  cgEl('cgImageCount').textContent = c.i;
+  cgEl('cgAudioCount').textContent = c.a;
+  cgEl('cgTextCount').textContent  = c.t;
 
-  // الصوت
-  cgEl('cgAudioName').textContent = d.audio ? d.audio.name + ' (' + cgFmtSize(d.audio.size) + ')' : 'لم يُختر ملف صوت';
-  cgEl('cgRemoveAudioBtn').disabled = !d.audio;
-  cgSyncAudioButtons();
-
-  // حالة التعديلات
   const dirty = cgIsDirty();
   cgEl('cgDirtyBadge').hidden = !dirty;
   cgEl('cgSaveBtn').disabled  = !dirty;
@@ -2235,7 +2412,8 @@ function cgOpenSettings(opts) {
   cg.draft = cgMakeDraft();
   cgHideConfirm();
   cgSetStatus('');
-  cgRenderSettings(true);
+  cgRenderLists();
+  cgRenderSettings();
   if (cg.storageErr) cgSetStatus(cgErrMsg(cg.storageErr, 'قراءة الملفات المحفوظة'), 'error');
 
   cgEnsureOverlay();
@@ -2248,9 +2426,10 @@ function cgOpenSettings(opts) {
 function cgCloseSettings() {
   cgStopAudio();
   cgHideConfirm();
-  if (cg.previewUrl) { URL.revokeObjectURL(cg.previewUrl); cg.previewUrl = null; }
-  cg.previewFor = null;
-  cgEl('cgImagePreview').removeAttribute('src');
+  cgEl('cgImageList').replaceChildren();
+  const thumbs = Object.values(cg.thumbUrls);
+  cg.thumbUrls = {};
+  setTimeout(() => thumbs.forEach(u => URL.revokeObjectURL(u)), 700);
   cgEl('cgSettingsPopup').classList.remove('active');
   cg.draft = null;
   cg.stage = null;
@@ -2325,43 +2504,66 @@ function cgCanLoadAudio(file) {
   });
 }
 
-async function cgHandleImageFile(file) {
-  if (!file || !cg.draft) return;
+/** يرجع نص الخطأ لو الصورة مرفوضة، أو null لو سليمة */
+async function cgCheckImage(file) {
   const okType = file.type ? /^image\/(png|jpe?g|webp|gif)$/.test(file.type) : CG_IMAGE_EXT.includes(cgExt(file.name));
-  if (!okType) { cgSetStatus('هذا الملف غير مدعوم. اختر صورة بصيغة PNG أو JPG أو WebP.', 'error'); return; }
-  if (file.size === 0) { cgSetStatus('الملف فارغ.', 'error'); return; }
-  if (file.size > CG_MAX_IMAGE) { cgSetStatus('الصورة كبيرة (' + cgFmtSize(file.size) + '). الحد الأقصى 10 MB.', 'error'); return; }
-  if (!(await cgCanDecodeImage(file))) { cgSetStatus('ما قدرت أقرأ الصورة، ممكن الملف تالف.', 'error'); return; }
-  if (!cg.draft) return;
-  cg.draft.image = { blob: file, name: file.name, type: file.type || '', size: file.size, savedAt: Date.now() };
-  cgRenderSettings(false);
-  cgSetStatus('تم اختيار الصورة. اضغط «حفظ» عشان تنحفظ.', 'info');
+  if (!okType) return 'صيغة غير مدعومة (استخدم PNG أو JPG أو WebP)';
+  if (file.size === 0) return 'الملف فارغ';
+  if (file.size > CG_MAX_IMAGE) return 'حجمه كبير (' + cgFmtSize(file.size) + ')، الحد 10 MB';
+  if (!(await cgCanDecodeImage(file))) return 'تعذّرت قراءته، ممكن الملف تالف';
+  return null;
 }
 
-async function cgHandleAudioFile(file) {
-  if (!file || !cg.draft) return;
+async function cgCheckAudio(file) {
   const typeOK = /^audio\/(mpeg|mp3|wav|x-wav|wave|ogg)$/.test(file.type) || file.type === 'application/ogg';
   const extOK  = CG_AUDIO_EXT.includes(cgExt(file.name));
-  if (!typeOK && !extOK) { cgSetStatus('هذا الملف غير مدعوم. اختر ملف صوت بصيغة MP3 أو WAV أو OGG.', 'error'); return; }
-  if (file.size === 0) { cgSetStatus('الملف فارغ.', 'error'); return; }
-  if (file.size > CG_MAX_AUDIO) { cgSetStatus('ملف الصوت كبير (' + cgFmtSize(file.size) + '). الحد الأقصى 25 MB.', 'error'); return; }
-  if (!(await cgCanLoadAudio(file))) { cgSetStatus('متصفحك ما يقدر يشغّل هذا الملف. جرّب MP3 أو WAV.', 'error'); return; }
-  if (!cg.draft) return;
-  cgStopAudio();
-  cg.draft.audio = { blob: file, name: file.name, type: file.type || cgAudioMime(file), size: file.size, savedAt: Date.now() };
-  cgRenderSettings(false);
-  cgSetStatus('تم اختيار الصوت. اضغط «تجربة» لسماعه، ثم «حفظ».', 'info');
+  if (!typeOK && !extOK) return 'صيغة غير مدعومة (استخدم MP3 أو WAV أو OGG)';
+  if (file.size === 0) return 'الملف فارغ';
+  if (file.size > CG_MAX_AUDIO) return 'حجمه كبير (' + cgFmtSize(file.size) + ')، الحد 25 MB';
+  if (!(await cgCanLoadAudio(file))) return 'متصفحك ما يقدر يشغّله';
+  return null;
 }
 
-function cgPreviewPlay() {
+/** إضافة عدة ملفات دفعة واحدة (kind = 'image' | 'audio') مع تقرير واضح بما أُضيف وما رُفض */
+async function cgAddFiles(kind, files) {
+  if (!cg.draft || !files.length) return;
+  const isImg = kind === 'image';
+  const added = [], rejected = [];
+  for (const file of files) {
+    if (!cg.draft) return;            // أُغلقت النافذة أثناء الفحص
+    const list = isImg ? cg.draft.images : cg.draft.audios;
+    if (list.some(r => r.name === file.name && r.size === file.size)) { rejected.push(file.name + ': مضاف من قبل'); continue; }
+    const err = isImg ? await cgCheckImage(file) : await cgCheckAudio(file);
+    if (!cg.draft) return;
+    if (err) { rejected.push(file.name + ': ' + err); continue; }
+    const rec = { id: cgNewId(), kind, blob: file, name: file.name, type: file.type || (isImg ? '' : cgAudioMime(file)), size: file.size, addedAt: Date.now() + added.length };
+    (isImg ? cg.draft.images : cg.draft.audios).push(rec);
+    added.push(rec);
+  }
+  if (isImg) cgRenderImages(); else cgRenderAudios();
+  cgRenderSettings();
+  const what = isImg ? 'صورة' : 'ملف صوت';
+  let msg = '';
+  if (added.length) msg += 'تمت إضافة ' + added.length + ' ' + what + '. اضغط «حفظ» عشان تنحفظ.';
+  if (rejected.length) {
+    const shown = rejected.slice(0, 4).join(' — ') + (rejected.length > 4 ? ' — و' + (rejected.length - 4) + ' غيرها' : '');
+    msg += (msg ? ' ' : '') + 'لم تُضف ' + rejected.length + ': ' + shown;
+  }
+  cgSetStatus(msg, added.length ? 'info' : 'error');
+}
+
+function cgPreviewAudio(id) {
   const d = cg.draft;
-  if (!d || !d.audio) return;
-  if (d.muted)      { cgSetStatus('الصوت مكتوم. ألغِ الكتم عشان تسمعه.', 'info'); return; }
-  if (d.volume <= 0) { cgSetStatus('مستوى الصوت 0%. ارفعه عشان تسمعه.', 'info'); return; }
+  if (!d) return;
+  if (cg.audioId === id) { cgStopAudio(); return; }          // الضغط مرة ثانية يوقف
+  const rec = d.audios.find(r => r.id === id);
+  if (!rec) return;
+  if (d.muted)       { cgStopAudio(); cgSetStatus('الصوت مكتوم. ألغِ الكتم عشان تسمعه.', 'info'); return; }
+  if (d.volume <= 0) { cgStopAudio(); cgSetStatus('مستوى الصوت 0%. ارفعه عشان تسمعه.', 'info'); return; }
   cgSetStatus('');
-  cgPlayAudio(d.audio, d.volume, {
-    onError:   () => cgSetStatus('ما قدرت أشغّل الصوت.', 'error'),
-    onBlocked: () => cgSetStatus('المتصفح منع التشغيل. اضغط «تجربة» مرة ثانية.', 'error'),
+  cgPlayAudio(rec, d.volume, {
+    onError:   () => cgSetStatus('ما قدرت أشغّل هذا الصوت.', 'error'),
+    onBlocked: () => cgSetStatus('المتصفح منع التشغيل. اضغط مرة ثانية.', 'error'),
   });
 }
 
@@ -2370,17 +2572,20 @@ function cgPreviewPlay() {
 async function cgSave() {
   const d = cg.draft;
   if (!d) return false;
-  const cfg = cgSanitize({ enabled: d.enabled, preferred: d.preferred, text: d.text, volume: d.volume, muted: d.muted, duration: d.duration });
+  const cfg = cgSanitize({ enabled: d.enabled, preferred: d.preferred, volume: d.volume, muted: d.muted, duration: d.duration, texts: d.texts });
 
-  const changes = {};
-  if (d.image !== cg.files.image) changes.image = d.image;
-  if (d.audio !== cg.files.audio) changes.audio = d.audio;
-  const hasChanges = Object.keys(changes).length > 0;
+  const draftAll = d.images.concat(d.audios);
+  const savedAll = cg.items.image.concat(cg.items.audio);
+  const draftIds = new Set(draftAll.map(r => r.id));
+  const savedIds = new Set(savedAll.map(r => r.id));
+  const put = draftAll.filter(r => !savedIds.has(r.id));
+  const del = savedAll.filter(r => !draftIds.has(r.id));
+  const hasChanges = put.length > 0 || del.length > 0;
 
   if (hasChanges) {
-    if (d.image || d.audio) { try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {} }
+    if (put.length) { try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {} }
     try {
-      await cgIdbApply(changes);
+      await cgIdbApply({ put, del: del.map(r => r.id) });
     } catch (e) {
       console.warn('CustomGuilt: فشل حفظ الملفات', e);
       cgSetStatus(cgErrMsg(e, 'أحفظ الملفات'), 'error');
@@ -2393,24 +2598,23 @@ async function cgSave() {
   } catch (e) {
     console.warn('CustomGuilt: فشل حفظ الإعدادات', e);
     if (hasChanges) {                                   // تراجع عن الملفات عشان ما يصير تعارض
-      const back = {};
-      Object.keys(changes).forEach(k => { back[k] = cg.files[k]; });
-      try { await cgIdbApply(back); } catch (e2) { console.warn('CustomGuilt: فشل التراجع', e2); }
+      try { await cgIdbApply({ put: del, del: put.map(r => r.id) }); } catch (e2) { console.warn('CustomGuilt: فشل التراجع', e2); }
     }
     cgSetStatus(cgErrMsg(e, 'أحفظ الإعدادات'), 'error');
     return false;
   }
 
   cg.cfg   = cfg;
-  cg.files = { image: d.image, audio: d.audio };
-  d.text   = cfg.text;
-  cgRenderSettings(false);
+  cg.items = { image: d.images.slice(), audio: d.audios.slice() };
+  d.texts  = cfg.texts.map(t => ({ ...t }));            // العبارات الفارغة تُحذف تلقائيًا
+  cgRenderTexts();
+  cgRenderSettings();
   cgSetStatus('تم الحفظ ✓', 'success');
   return true;
 }
 
 function cgAskReset() {
-  cgShowConfirm('بتنحذف الصورة والصوت والنص وترجع الإعدادات للوضع الافتراضي. ما تقدر تتراجع. متأكد؟', [
+  cgShowConfirm('بتنحذف كل الصور والأصوات والعبارات وترجع الإعدادات للوضع الافتراضي. ما تقدر تتراجع. متأكد؟', [
     { label: 'نعم، احذف كل شيء', cls: 'danger', fn: cgDoReset },
     { label: 'تراجع' },
   ]);
@@ -2418,27 +2622,30 @@ function cgAskReset() {
 
 async function cgDoReset() {
   cgStopAudio();
-  if (cg.files.image || cg.files.audio) {
+  const all = cg.items.image.concat(cg.items.audio);
+  if (all.length) {
     try {
-      await cgIdbApply({ image: null, audio: null });
+      await cgIdbApply({ del: all.map(r => r.id) });
     } catch (e) {
       console.warn('CustomGuilt: فشل الحذف', e);
       cgSetStatus(cgErrMsg(e, 'أحذف الملفات'), 'error');
       return;
     }
   }
-  try { localStorage.removeItem(CG_LS_KEY); } catch (e) { console.warn('CustomGuilt: فشل حذف الإعدادات', e); }
-  cg.cfg   = { ...CG_DEFAULTS };
-  cg.files = { image: null, audio: null };
+  try { localStorage.removeItem(CG_LS_KEY); localStorage.removeItem(CG_LAST_KEY); } catch (e) { console.warn('CustomGuilt: فشل حذف الإعدادات', e); }
+  cg.cfg   = { ...CG_DEFAULTS, texts: [] };
+  cg.items = { image: [], audio: [] };
+  cg.last  = { image: null, audio: null, text: null };
   cg.draft = cgMakeDraft();
-  cgRenderSettings(true);
+  cgRenderLists();
+  cgRenderSettings();
   cgSetStatus('تم حذف المحتوى المخصص ورجعت الإعدادات الافتراضية ✓', 'success');
 }
 
 function cgPreviewFull() {
   const d = cg.draft;
   if (!d) return;
-  if (!cgHasContent(d, d)) { cgSetStatus('أضف صورة أو صوتًا أو نصًا أول عشان تشوف المعاينة.', 'info'); return; }
+  if (!cgHasContent(d)) { cgSetStatus('أضف صورة أو صوتًا أو عبارة أول عشان تشوف المعاينة.', 'info'); return; }
   cgStopAudio();
   cgHideConfirm();
   cgEl('cgSettingsPopup').classList.remove('active');
@@ -2469,50 +2676,77 @@ function cgBindEvents() {
   cgEl('cgPreviewBtn').addEventListener('click', cgPreviewFull);
   cgEl('cgResetBtn').addEventListener('click', cgAskReset);
 
-  cgEl('cgEnabled').addEventListener('change', e => { cg.draft.enabled = e.target.checked; cgRenderSettings(false); });
-  cgEl('cgPreferred').addEventListener('change', e => { cg.draft.preferred = e.target.value; cgRenderSettings(false); });
-  cgEl('cgDuration').addEventListener('change', e => { cg.draft.duration = Number(e.target.value) || 10; cgRenderSettings(false); });
-  cgEl('cgText').addEventListener('input', e => { cg.draft.text = e.target.value; cgRenderSettings(false); });
+  cgEl('cgEnabled').addEventListener('change', e => { cg.draft.enabled = e.target.checked; cgRenderSettings(); });
+  cgEl('cgPreferred').addEventListener('change', e => { cg.draft.preferred = e.target.value; cgRenderSettings(); });
+  cgEl('cgDuration').addEventListener('change', e => { cg.draft.duration = Number(e.target.value) || 10; cgRenderSettings(); });
 
   cgEl('cgVolume').addEventListener('input', e => {
     cg.draft.volume = Number(e.target.value);
     if (cg.audioEl) cg.audioEl.volume = cg.draft.volume / 100;     // تغيير حيّ أثناء التجربة
-    cgRenderSettings(false);
+    cgRenderSettings();
   });
   cgEl('cgMute').addEventListener('change', e => {
     cg.draft.muted = e.target.checked;
     if (cg.draft.muted) cgStopAudio();
-    cgRenderSettings(false);
+    cgRenderSettings();
   });
 
-  // الصورة
+  // الصور (متعددة)
   cgEl('cgChooseImageBtn').addEventListener('click', () => cgEl('cgImageInput').click());
   cgEl('cgImageInput').addEventListener('change', e => {
-    const f = e.target.files && e.target.files[0];
-    e.target.value = '';                                           // يسمح باختيار نفس الملف مرة ثانية
-    cgHandleImageFile(f);
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';                                           // يسمح باختيار نفس الملفات مرة ثانية
+    cgAddFiles('image', files);
   });
-  cgEl('cgRemoveImageBtn').addEventListener('click', () => {
-    cg.draft.image = null;
-    cgRenderSettings(false);
-    cgSetStatus('تم حذف الصورة من التعديلات. اضغط «حفظ» لتثبيت الحذف.', 'info');
+  cgEl('cgImageList').addEventListener('click', e => {
+    const b = e.target.closest('[data-act="del-image"]');
+    if (!b || !cg.draft) return;
+    cg.draft.images = cg.draft.images.filter(r => r.id !== b.dataset.id);
+    cgRenderImages();
+    cgRenderSettings();
   });
 
-  // الصوت
+  // الأصوات (متعددة)
   cgEl('cgChooseAudioBtn').addEventListener('click', () => cgEl('cgAudioInput').click());
   cgEl('cgAudioInput').addEventListener('change', e => {
-    const f = e.target.files && e.target.files[0];
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
-    cgHandleAudioFile(f);
+    cgAddFiles('audio', files);
   });
-  cgEl('cgRemoveAudioBtn').addEventListener('click', () => {
-    cgStopAudio();
-    cg.draft.audio = null;
-    cgRenderSettings(false);
-    cgSetStatus('تم حذف الصوت من التعديلات. اضغط «حفظ» لتثبيت الحذف.', 'info');
+  cgEl('cgAudioList').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b || !cg.draft) return;
+    if (b.dataset.act === 'play-audio') { cgPreviewAudio(b.dataset.id); return; }
+    if (b.dataset.act === 'del-audio') {
+      if (cg.audioId === b.dataset.id) cgStopAudio();
+      cg.draft.audios = cg.draft.audios.filter(r => r.id !== b.dataset.id);
+      cgRenderAudios();
+      cgRenderSettings();
+    }
   });
-  cgEl('cgPlayBtn').addEventListener('click', cgPreviewPlay);
-  cgEl('cgStopBtn').addEventListener('click', cgStopAudio);
+
+  // العبارات (متعددة)
+  cgEl('cgAddTextBtn').addEventListener('click', () => {
+    if (!cg.draft) return;
+    cg.draft.texts.push({ id: cgNewId(), text: '' });
+    cgRenderTexts();
+    cgRenderSettings();
+    const tas = cgEl('cgTextList').querySelectorAll('textarea');
+    if (tas.length) { tas[tas.length - 1].focus(); tas[tas.length - 1].scrollIntoView({ block: 'nearest' }); }
+  });
+  cgEl('cgTextList').addEventListener('input', e => {
+    const ta = e.target.closest('textarea');
+    if (!ta || !cg.draft) return;
+    const t = cg.draft.texts.find(x => x.id === ta.dataset.id);
+    if (t) { t.text = ta.value; cgRenderSettings(); }
+  });
+  cgEl('cgTextList').addEventListener('click', e => {
+    const b = e.target.closest('[data-act="del-text"]');
+    if (!b || !cg.draft) return;
+    cg.draft.texts = cg.draft.texts.filter(x => x.id !== b.dataset.id);
+    cgRenderTexts();
+    cgRenderSettings();
+  });
 
   // تنبيه لو حاول يغلق الصفحة وفي تعديلات غير محفوظة
   window.addEventListener('beforeunload', e => {
@@ -2547,11 +2781,11 @@ function cgInit() {
   cg.inited = true;
   cgLoadConfig();
   cg.loadPromise = cgIdbLoad()
-    .then(f => { cg.files = f; })
+    .then(f => { cg.items = f; })
     .catch(e => {
       console.warn('CustomGuilt: تعذّر قراءة الملفات المحفوظة', e);
       cg.storageErr = e;
-      cg.files = { image: null, audio: null };
+      cg.items = { image: [], audio: [] };
     })
     .then(() => { cg.filesReady = true; });
   cgBindEvents();
