@@ -775,31 +775,26 @@
         </div>
       </section>
 
+      <p class="cg-hint">أضف أي عدد تبي من الصور والأصوات والعبارات. في كل مرة تضغط «تسخيت» يُختار عنصر عشوائي من كل قسم (كل قسم مستقل عن الثاني).</p>
+
       <section class="cg-sec">
-        <h3>🖼 الصورة</h3>
-        <input type="file" id="cgImageInput" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" hidden>
+        <h3>🖼 الصور <span class="cg-count" id="cgImageCount">0</span></h3>
+        <input type="file" id="cgImageInput" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden>
         <div class="cg-row">
-          <button class="cg-btn" id="cgChooseImageBtn" type="button">🖼 اختيار صورة <small dir="ltr">Choose Image</small></button>
-          <button class="cg-btn cg-btn-danger" id="cgRemoveImageBtn" type="button">🗑 حذف</button>
+          <button class="cg-btn" id="cgChooseImageBtn" type="button">🖼 إضافة صور <small dir="ltr">Choose Image</small></button>
         </div>
-        <div class="cg-file-name" id="cgImageName"></div>
-        <div class="cg-img-preview" id="cgImagePreviewWrap" hidden>
-          <img id="cgImagePreview" alt="معاينة الصورة المختارة">
-        </div>
+        <div class="cg-thumbs" id="cgImageList"></div>
+        <div class="cg-empty" id="cgImageEmpty">لا توجد صور بعد</div>
       </section>
 
       <section class="cg-sec">
-        <h3>🔊 الصوت</h3>
-        <input type="file" id="cgAudioInput" accept="audio/mpeg,audio/wav,audio/x-wav,audio/ogg,.mp3,.wav,.ogg" hidden>
+        <h3>🔊 الأصوات <span class="cg-count" id="cgAudioCount">0</span></h3>
+        <input type="file" id="cgAudioInput" accept="audio/mpeg,audio/wav,audio/x-wav,audio/ogg,.mp3,.wav,.ogg" multiple hidden>
         <div class="cg-row">
-          <button class="cg-btn" id="cgChooseAudioBtn" type="button">🎵 اختيار صوت <small dir="ltr">Choose Audio</small></button>
-          <button class="cg-btn cg-btn-danger" id="cgRemoveAudioBtn" type="button">🗑 حذف</button>
+          <button class="cg-btn" id="cgChooseAudioBtn" type="button">🎵 إضافة أصوات <small dir="ltr">Choose Audio</small></button>
         </div>
-        <div class="cg-file-name" id="cgAudioName"></div>
-        <div class="cg-row">
-          <button class="cg-btn" id="cgPlayBtn" type="button">▶ تجربة <small dir="ltr">Play Preview</small></button>
-          <button class="cg-btn" id="cgStopBtn" type="button">⏹ إيقاف <small dir="ltr">Stop</small></button>
-        </div>
+        <div class="cg-audio-list" id="cgAudioList"></div>
+        <div class="cg-empty" id="cgAudioEmpty">لا توجد أصوات بعد</div>
         <div class="cg-vol-row">
           <label for="cgVolume">مستوى الصوت</label>
           <input type="range" id="cgVolume" min="0" max="100" step="1" value="100">
@@ -807,14 +802,17 @@
         </div>
         <label class="cg-check-row" for="cgMute">
           <input type="checkbox" id="cgMute">
-          <span>كتم الصوت (يبقى الملف محفوظ)</span>
+          <span>كتم الصوت (تبقى الملفات محفوظة)</span>
         </label>
       </section>
 
       <section class="cg-sec">
-        <h3>✍️ النص</h3>
-        <textarea id="cgText" rows="5" dir="auto" maxlength="2000" placeholder="اكتب رسالتك هنا..." aria-label="نص الرسالة"></textarea>
-        <div class="cg-counter"><span id="cgTextCount">0</span> / 2000</div>
+        <h3>✍️ العبارات <span class="cg-count" id="cgTextCount">0</span></h3>
+        <div class="cg-text-list" id="cgTextList"></div>
+        <div class="cg-empty" id="cgTextEmpty">لا توجد عبارات بعد</div>
+        <div class="cg-row">
+          <button class="cg-btn" id="cgAddTextBtn" type="button">➕ إضافة عبارة</button>
+        </div>
       </section>
     </div>
 
@@ -822,7 +820,7 @@
       <span class="cg-dirty" id="cgDirtyBadge" hidden>● تغييرات غير محفوظة</span>
       <div class="cg-footer-btns">
         <button class="cg-btn cg-btn-primary" id="cgSaveBtn" type="button">💾 حفظ <small dir="ltr">Save Changes</small></button>
-        <button class="cg-btn" id="cgPreviewBtn" type="button">👁 معاينة كاملة</button>
+        <button class="cg-btn" id="cgPreviewBtn" type="button">👁 معاينة عشوائية</button>
         <button class="cg-btn" id="cgCancelBtn" type="button">إلغاء</button>
         <button class="cg-btn cg-btn-danger" id="cgResetBtn" type="button">↺ استعادة الافتراضي</button>
       </div>
