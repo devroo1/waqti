@@ -1212,6 +1212,9 @@ function setupKeyboard() {
       return;
     }
 
+    // نافذة الجدول اليومي مفتوحة → لا اختصارات عامة (إلا لو ظهر بوب آب التايمر الإجباري)
+    if (window.DailySchedule && window.DailySchedule.isModalOpen() && !state.activePopup) return;
+
     if (isInput) return; // لا اختصارات داخل الإن بوت
 
     /* ========= بوب آب النشاط مفتوح ========= */
@@ -1257,7 +1260,7 @@ function setupKeyboard() {
     if (e.altKey) {
       if (e.key==='1') { e.preventDefault(); switchTab('timer');     return; }
       if (e.key==='2') { e.preventDefault(); switchTab('dashboard'); return; }
-      if (e.key==='3') { e.preventDefault(); switchTab('plan');      return; }
+      if (e.key==='3') { e.preventDefault(); window.DailySchedule && window.DailySchedule.togglePanel(); return; }
       if (e.key==='4') { e.preventDefault(); switchTab('history');   return; }
       if (e.key==='5') { e.preventDefault(); switchTab('compare');   return; }
     }
@@ -1273,33 +1276,6 @@ function setupKeyboard() {
       }
     }
 
-    // ======== اختصارات صفحة الخطة ========
-    if (document.getElementById('page-plan').classList.contains('active')) {
-      // أسهم: التنقل بين أيام الخطة
-      if (e.key==='ArrowLeft')  { e.preventDefault(); planState.viewDate=shiftDate(planState.viewDate,-1); renderPlanPage(); return; }
-      if (e.key==='ArrowRight') { e.preventDefault(); planState.viewDate=shiftDate(planState.viewDate,+1); renderPlanPage(); return; }
-
-      // N — إضافة مادة جديدة
-      if ((e.key==='n'||e.key==='N') && !state.activePopup) { e.preventDefault(); openPlanPopup(); return; }
-
-      // . أو Delete — رجوع لليوم الحالي
-      if (e.key==='.'||e.key==='Delete') { e.preventDefault(); planState.viewDate=todayKey(); renderPlanPage(); return; }
-
-      // أرقام 1-9: تفعيل/إلغاء الموضوع رقم N في اليوم الحالي (كل المواضيع مرتبة)
-      if (e.key>='1' && e.key<='9' && !state.activePopup) {
-        e.preventDefault();
-        const idx   = parseInt(e.key) - 1;
-        const data  = getPlanData(planState.viewDate);
-        // اجمع كل المواضيع مرتبة
-        let allTopics = [];
-        data.forEach(s => s.topics.forEach(t => allTopics.push({ subjectId:s.id, topicId:t.id })));
-        if (allTopics[idx]) {
-          toggleTopic(allTopics[idx].subjectId, allTopics[idx].topicId);
-        }
-        return;
-      }
-    }
-    // =========================================
 
     // R — ريست (فقط قبل البدء)
     if (e.key==='r'||e.key==='R') { if (!state.running) resetTimer(); return; }
@@ -2795,528 +2771,724 @@ document.addEventListener('DOMContentLoaded', cgInit);
 
 
 // ==========================================
-// 📋 نظام الخطة اليومية — من الصفر
+// 📅 Daily Schedule — الجدول اليومي
+// ------------------------------------------
+// • المواد السبع ثابتة، والمهام تُجهَّز لكل يوم على حدة
+// • العادات اليومية ثابتة وتتكرر تلقائيًا كل يوم
+// • التخزين: localStorage فقط (لا علاقة له بـ Firebase أو التايمر)
+//     waqti_ds_day_YYYY-MM-DD  → جدول يوم كامل (مهام + عادات + حالة الإنجاز)
+//     waqti_ds_habits          → قائمة العادات الثابتة
+//     waqti_ds_ui              → حالة الفتح/الإغلاق للوحة
+//     waqti_ds_migrated        → علامة نقل بيانات نظام "الخطة" القديم
+// • بيانات "الخطة" القديمة (waqti_plan_*) لا تُحذف من المتصفح أبدًا
 // ==========================================
+(function () {
+  'use strict';
 
-// ---- بيانات الخطة ----
-const planState = {
-  viewDate: todayKey(),
-  editId:   null,       // id المادة عند التعديل
-  color:    '#6c63ff',
-  days:     [],
-  topics:   [],         // [{id, text}] قبل الحفظ
-  step:     1,          // الخطوة الحالية في البوب آب (1-4)
-};
+  const SUBJECTS = [
+    { key: 'arabic',  name: 'عربي',     color: '#f59e0b' },
+    { key: 'math',    name: 'رياضيات',  color: '#6c63ff' },
+    { key: 'chem',    name: 'كيمياء',   color: '#4ade80' },
+    { key: 'physics', name: 'فيزياء',   color: '#60a5fa' },
+    { key: 'islamic', name: 'إسلامية',  color: '#22d3ee' },
+    { key: 'english', name: 'إنكليزي',  color: '#f43f5e' },
+    { key: 'bio',     name: 'أحياء',    color: '#a78bfa' },
+  ];
+  const DAYS   = ['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+  const MONTHS = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  const K_DAY = 'waqti_ds_day_', K_HABITS = 'waqti_ds_habits', K_UI = 'waqti_ds_ui', K_MIG = 'waqti_ds_migrated';
+  const WIDE = 1100;           // أوسع من هذا → لوحة جانبية ثابتة
+  const MAX_AHEAD = 7;         // أقصى عدد أيام قادمة يمكن تجهيزها
 
-const PLAN_COLOR_NAMES = {
-  '#6c63ff':'بنفسجي','#4ade80':'أخضر','#60a5fa':'أزرق','#f59e0b':'ذهبي',
-  '#f43f5e':'أحمر','#a78bfa':'ليلكي','#22d3ee':'سماوي','#f97316':'برتقالي',
-};
-const PLAN_DAY_NAMES  = ['أحد','إثن','ثلا','أرب','خمي','جمع','سبت'];
-const PLAN_DAY_FULL   = ['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
-const PLAN_MONTHS     = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  const $   = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const isWide = () => window.innerWidth >= WIDE;
 
-// ---- تخزين ----
-function getPlan(dateKey)      { return JSON.parse(localStorage.getItem('waqti_plan_'+dateKey)||'[]'); }
-function savePlan(dateKey, d)  { localStorage.setItem('waqti_plan_'+dateKey, JSON.stringify(d)); }
-function getTemplates()        { return JSON.parse(localStorage.getItem('waqti_plan_tpl')||'[]'); }
-function saveTemplates(t)      { localStorage.setItem('waqti_plan_tpl', JSON.stringify(t)); }
-function planUID()             { return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+  const S = {
+    view: todayKey(), today: todayKey(),
+    editing: null,          // {t:'task'|'habit', k, id}
+    confirm: null,          // 'h:<id>'
+    modal: null,            // 'prepare' | 'reminder' | 'history'
+    draft: null, draftStart: '', stash: {}, escArm: false,
+    pendingReminder: false, refocus: null,
+  };
+  let ui = { collapsed: null, closed: {} };
 
-function dayOfWeekFromKey(dk) {
-  const [y,m,d] = dk.split('-').map(Number);
-  return new Date(y,m-1,d).getDay();
-}
+  /* ---------- تخزين ---------- */
+  function jget(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch (e) { return fb; } }
+  function jset(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+    catch (e) { toast('⚠️ تعذّر الحفظ — التخزين المحلي ممتلئ أو غير متاح'); return false; }
+  }
+  const loadDay  = dk => jget(K_DAY + dk, null);
+  const getHabits = () => { const h = jget(K_HABITS, []); return Array.isArray(h) ? h.filter(x => x && x.id && x.name) : []; };
+  const saveHabits = h => jset(K_HABITS, h);
+  const saveUI = () => jset(K_UI, ui);
 
-// دمج القوالب مع اليوم
-function applyTemplates(dk) {
-  const dow  = dayOfWeekFromKey(dk);
-  const data = getPlan(dk);
-  getTemplates()
-    .filter(t => t.days.includes(dow) && !data.find(s => s.tplId===t.id))
-    .forEach(t => data.push({
-      id: planUID(), tplId: t.id, name: t.name, color: t.color,
-      days: t.days, collapsed: false,
-      topics: t.topics.map(x=>({id:planUID(), text:x.text, done:false}))
+  function normDay(r) {
+    r = r && typeof r === 'object' ? r : {};
+    const subjects = (Array.isArray(r.subjects) ? r.subjects : []).map(s => ({
+      ...s, tasks: Array.isArray(s.tasks) ? s.tasks : [],
     }));
-  savePlan(dk, data);
-  return data;
-}
-
-// ---- حساب التقدم ----
-function planProgress(data) {
-  let total=0, done=0;
-  data.forEach(s => s.topics.forEach(t => { total++; if(t.done) done++; }));
-  return {total, done, pct: total ? Math.round(done/total*100) : 0};
-}
-
-// ==========================================
-// رندر صفحة الخطة
-// ==========================================
-
-function renderPlanPage() {
-  const data = applyTemplates(planState.viewDate);
-  _renderPlanHeader();
-  _renderWeekStrip();
-  _renderPlanProgress(data);
-  _renderSubjects(data);
-}
-
-function _renderPlanHeader() {
-  const dk    = planState.viewDate;
-  const today = todayKey();
-  const [y,m,d] = dk.split('-').map(Number);
-  const date  = new Date(y,m-1,d);
-  let label   = dk===today ? 'اليوم'
-              : dk===shiftDate(today,-1) ? 'أمس'
-              : dk===shiftDate(today, 1) ? 'غداً'
-              : PLAN_DAY_FULL[date.getDay()];
-  document.getElementById('planDateLabel').textContent = label;
-  document.getElementById('planDateSub').textContent   = `${d} ${PLAN_MONTHS[m-1]} ${y}`;
-}
-
-function _renderWeekStrip() {
-  const strip = document.getElementById('planWeekStrip');
-  strip.innerHTML = '';
-  const today = todayKey();
-  const [ty,tm,td] = today.split('-').map(Number);
-  const sun   = new Date(ty,tm-1,td);
-  sun.setDate(sun.getDate() - sun.getDay()); // بداية الأسبوع (أحد)
-
-  for (let i=0; i<7; i++) {
-    const d   = new Date(sun); d.setDate(sun.getDate()+i);
-    const dk  = localDateKey(d);
-    const dow = d.getDay();
-    const hasPlan = getPlan(dk).length > 0
-      || getTemplates().some(t => t.days.includes(dow));
-
-    const btn = document.createElement('div');
-    btn.className = 'plan-week-day';
-    if (dk === today)               btn.classList.add('today');
-    if (dk === planState.viewDate)  btn.classList.add('active');
-    if (hasPlan)                    btn.classList.add('has-plan');
-    btn.innerHTML = `<span class="plan-wd-name">${PLAN_DAY_NAMES[dow]}</span>
-                     <span class="plan-wd-num">${d.getDate()}</span>`;
-    btn.addEventListener('click', () => { planState.viewDate=dk; renderPlanPage(); });
-    strip.appendChild(btn);
+    return { prepared: !!r.prepared, subjects, habits: Array.isArray(r.habits) ? r.habits : null };
   }
-}
+  function saveDay(dk, rec) {
+    const o = { v: 1, prepared: !!rec.prepared, subjects: rec.subjects, updatedAt: Date.now() };
+    if (rec.habits) o.habits = rec.habits;
+    return jset(K_DAY + dk, o);
+  }
 
-function _renderPlanProgress(data) {
-  const {total,done,pct} = planProgress(data);
-  document.getElementById('planProgressPct').textContent   = pct+'%';
-  document.getElementById('planProgressFill').style.width  = pct+'%';
-  document.getElementById('planProgressCounts').textContent =
-    total===0 ? 'لا توجد مواضيع — اضغط N لإضافة مادة'
-             : `${done} من ${total} موضوع مكتمل`;
-}
+  /** يطابق عادات اليوم مع قائمة العادات الثابتة (لليوم الحالي فقط) */
+  function syncHabits(dk) {
+    const raw = loadDay(dk), rec = normDay(raw), defs = getHabits(), old = rec.habits || [];
+    const next = defs.map(h => { const o = old.find(x => x.id === h.id); return { id: h.id, name: h.name, done: !!(o && o.done) }; });
+    if (JSON.stringify(next) !== JSON.stringify(old) && (raw || next.length)) { rec.habits = next; saveDay(dk, rec); }
+    rec.habits = next;
+    return rec;
+  }
+  function modeOf(dk) { const t = todayKey(); return dk === t ? 'today' : dk < t ? 'past' : 'future'; }
+  function getView(dk) {
+    const m = modeOf(dk);
+    if (m === 'today') { const r = syncHabits(dk); r.exists = true; return r; }
+    const raw = loadDay(dk), r = normDay(raw);
+    r.exists = !!raw;
+    r.habits = m === 'future' ? getHabits().map(h => ({ id: h.id, name: h.name, done: false })) : (r.habits || []);
+    return r;
+  }
+  function mutate(dk, fn) {
+    if (modeOf(dk) === 'past') return;
+    const rec = getView(dk);
+    fn(rec);
+    if (modeOf(dk) === 'future') rec.habits = null;   // عادات الأيام القادمة تُحسب عند حلول اليوم
+    saveDay(dk, rec);
+  }
+  const isPrepared = rec => rec.prepared && rec.subjects.length > 0;
 
-function _renderSubjects(data) {
-  const container = document.getElementById('planSubjects');
-  const empty     = document.getElementById('planEmpty');
-  container.querySelectorAll('.plan-subject-card').forEach(e=>e.remove());
+  function stats(rec) {
+    let tt = 0, td = 0;
+    rec.subjects.forEach(s => s.tasks.forEach(t => { tt++; if (t.done) td++; }));
+    const ht = rec.habits.length, hd = rec.habits.filter(h => h.done).length, tot = tt + ht;
+    return { tt, td, ht, hd, pct: tot ? Math.round((td + hd) / tot * 100) : 0 };
+  }
+  function subjStat(s) {
+    const t = s.tasks.length, d = s.tasks.filter(x => x.done).length;
+    return { t, d, pct: t ? Math.round(d / t * 100) : 0 };
+  }
 
-  if (data.length===0) { empty.style.display='block'; return; }
-  empty.style.display = 'none';
+  /* ---------- تواريخ ---------- */
+  function parts(dk) { const [y, m, d] = dk.split('-').map(Number); return { y, m, d, dow: new Date(y, m - 1, d).getDay() }; }
+  function dateStr(dk) { const p = parts(dk); return `${DAYS[p.dow]} ${p.d} ${MONTHS[p.m - 1]} ${p.y}`; }
+  function relLabel(dk) {
+    const t = todayKey();
+    if (dk === t) return 'اليوم';
+    if (dk === shiftDate(t, -1)) return 'أمس';
+    if (dk === shiftDate(t, 1)) return 'غدًا';
+    return DAYS[parts(dk).dow];
+  }
 
-  data.forEach(subj => {
-    const {done,total,pct} = _subjProgress(subj);
-    const card = document.createElement('div');
-    card.className = 'plan-subject-card';
-    card.dataset.id = subj.id;
-    card.style.setProperty('--sc', subj.color);
-    if (subj.collapsed) card.classList.add('collapsed');
+  /* ---------- نقل بيانات نظام الخطة القديم ---------- */
+  function normName(s) {
+    return String(s || '').replace(/[\u064B-\u065F\u0670]/g, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه')
+      .replace(/ى/g, 'ي').replace(/\s+/g, ' ').trim().toLowerCase().replace(/^ال/, '');
+  }
+  const ALIASES = {
+    arabic:  ['عربي', 'عربيه', 'لغه عربيه', 'اللغه العربيه', 'لغتي'],
+    math:    ['رياضيات', 'رياضه'],
+    chem:    ['كيمياء', 'كيميا', 'chemistry'],
+    physics: ['فيزياء', 'فيزيا', 'physics'],
+    islamic: ['اسلاميه', 'تربيه اسلاميه', 'دين', 'تربيه دينيه'],
+    english: ['انكليزي', 'انجليزي', 'انكليزيه', 'انجليزيه', 'english', 'لغه انكليزيه', 'لغه انجليزيه'],
+    bio:     ['احياء', 'احيا', 'بايولوجي', 'biology'],
+  };
+  const aliasMap = {};
+  Object.keys(ALIASES).forEach(k => ALIASES[k].forEach(a => { aliasMap[normName(a)] = k; }));
+  const matchSubject = name => { const k = aliasMap[normName(name)]; return k ? SUBJECTS.find(s => s.key === k) : null; };
 
-    card.innerHTML = `
-      <div class="plan-subject-header">
-        <div class="plan-subject-dot" style="background:${subj.color}"></div>
-        <span class="plan-subject-name">${subj.name}</span>
-        <div class="plan-subject-mini-progress">
-          <div class="plan-subject-mini-fill" style="width:${pct}%;background:${subj.color}"></div>
-        </div>
-        <span class="plan-subject-meta">${done}/${total}</span>
-        <div class="plan-subject-actions">
-          <button class="plan-subject-action-btn edit-btn" title="تعديل">✏️</button>
-          <button class="plan-subject-action-btn del plan-del-btn" title="حذف">🗑</button>
-        </div>
-        <span class="plan-subject-chevron">▲</span>
-      </div>
-      <div class="plan-topics-body">
-        ${subj.topics.map((t,i) => `
-          <div class="plan-topic-item${t.done?' done':''}" data-tid="${t.id}">
-            <div class="plan-topic-check" style="${t.done?`background:${subj.color};border-color:${subj.color};color:white`:''}">
-              ${t.done?'✓':''}
-            </div>
-            <span class="plan-topic-num">${i+1}.</span>
-            <span class="plan-topic-text">${_esc(t.text)}</span>
-            <button class="plan-topic-del" data-tid="${t.id}">✕</button>
-          </div>`).join('')}
-        <div class="plan-inline-add">
-          <input class="plan-inline-input" placeholder="أضف موضوعاً..." maxlength="80"/>
-          <button class="plan-inline-add-btn">+</button>
-        </div>
+  function migrateLegacy() {
+    if (localStorage.getItem(K_MIG)) return;
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('waqti_plan_') && /^\d{4}-\d{2}-\d{2}$/.test(k.slice(11))) keys.push(k);
+      }
+      keys.forEach(k => {
+        try {
+          const dk = k.slice(11), arr = JSON.parse(localStorage.getItem(k) || '[]');
+          if (!Array.isArray(arr) || !arr.length || localStorage.getItem(K_DAY + dk)) return;
+          const subjects = [];
+          arr.forEach(s => {
+            const tasks = (Array.isArray(s.topics) ? s.topics : [])
+              .map(t => ({ id: t.id || uid(), text: String(t.text || '').trim(), count: null, done: !!t.done }))
+              .filter(t => t.text);
+            const fixed = matchSubject(s.name);
+            if (fixed) {
+              let ex = subjects.find(x => x.key === fixed.key);
+              if (!ex) { ex = { key: fixed.key, name: fixed.name, color: fixed.color, tasks: [] }; subjects.push(ex); }
+              ex.tasks.push(...tasks);
+            } else {
+              subjects.push({ key: 'legacy_' + (s.id || uid()), name: String(s.name || 'مادة'), color: s.color || '#6c63ff', legacy: true, tasks });
+            }
+          });
+          if (subjects.length) jset(K_DAY + dk, { v: 1, prepared: true, subjects, updatedAt: Date.now() });
+        } catch (e) { console.warn('Daily Schedule: تعذّر نقل', k, e); }
+      });
+      localStorage.setItem(K_MIG, '1');
+    } catch (e) { console.warn('Daily Schedule: فشل نقل بيانات الخطة القديمة', e); }
+  }
+
+  /* ---------- رسالة سريعة ---------- */
+  function toast(msg) {
+    const t = document.createElement('div');
+    t.className = 'ds-toast'; t.textContent = msg;
+    document.body.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('show'));
+    setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2600);
+  }
+
+  /* =====================================================
+     اللوحة الثابتة
+     ===================================================== */
+  function collapsedNow() { return ui.collapsed === null ? !isWide() : !!ui.collapsed; }
+
+  function render() {
+    const body = $('dsBody'), scroll = body.scrollTop;
+    const rec = getView(S.view), mode = modeOf(S.view), st = stats(rec);
+    const col = collapsedNow(), prepared = isPrepared(rec);
+    document.body.classList.toggle('ds-collapsed', col);
+    document.body.classList.toggle('ds-expanded', !col);
+    $('dsPanel').classList.toggle('collapsed', col);
+    const cb = $('dsCollapseBtn');
+    cb.textContent = isWide() ? (col ? '⇤' : '⇥') : (col ? '▼' : '▲');
+    cb.setAttribute('aria-expanded', String(!col));
+
+    $('dsMiniRing').style.setProperty('--p', st.pct);
+    $('dsMiniPct').textContent = st.pct + '%';
+    $('dsHeadSub').textContent = relLabel(S.view) + ' · ' + dateStr(S.view);
+
+    const editable = mode !== 'past';
+    const canCheck = mode === 'today';
+    let h = '';
+
+    // تنقل بين الأيام
+    const maxDk = shiftDate(todayKey(), MAX_AHEAD);
+    h += `<div class="ds-nav">
+      <button class="ds-icon-btn" data-a="prev" title="اليوم السابق">◀</button>
+      <div class="ds-nav-label"><b>${esc(relLabel(S.view))}</b><span>${esc(dateStr(S.view))}</span></div>
+      <button class="ds-icon-btn" data-a="next" title="اليوم التالي" ${S.view >= maxDk ? 'disabled' : ''}>▶</button>
+    </div>
+    <div class="ds-actions">
+      ${mode !== 'today' ? '<button class="ds-btn ds-btn-sm" data-a="gotoday">اليوم</button>' : ''}
+      ${editable && prepared ? '<button class="ds-btn ds-btn-sm" data-a="prepare">✏️ تعديل الجدول <kbd>P</kbd></button>' : ''}
+      <button class="ds-btn ds-btn-sm" data-a="history">📜 السجل</button>
+      <button class="ds-btn ds-btn-sm" data-a="bell" title="إظهار رسالة التذكير">🔔</button>
+    </div>`;
+
+    // شريط الحالة
+    if (mode === 'past') {
+      h += rec.exists
+        ? '<div class="ds-banner ds-banner-info">📜 يوم سابق — للعرض فقط</div>'
+        : '<div class="ds-banner ds-banner-info">لا توجد بيانات محفوظة لهذا اليوم</div>';
+    } else if (!prepared) {
+      h += `<div class="ds-banner ds-banner-warn">
+        <div>${mode === 'today' ? 'لم تجهز جدول اليوم بعد، جهّز مهامك حتى تبدأ يومك.' : 'لم يُجهَّز جدول هذا اليوم بعد.'}</div>
+        <button class="ds-btn ds-btn-primary ds-btn-sm" data-a="prepare">📝 ${mode === 'today' ? "Prepare Today's Schedule" : 'Prepare Schedule'}</button>
       </div>`;
+    } else if (mode === 'future') {
+      h += '<div class="ds-banner ds-banner-info">📅 يوم قادم — يمكنك تعديل جدوله، والإنجاز يبدأ في يومه</div>';
+    }
 
-    // طي/توسيع
-    card.querySelector('.plan-subject-header').addEventListener('click', e => {
-      if (e.target.closest('.plan-subject-actions')) return;
-      subj.collapsed = !subj.collapsed;
-      card.classList.toggle('collapsed', subj.collapsed);
-      _updateSubj(subj);
-    });
+    // الإنجاز الكلي
+    if (mode !== 'past' || rec.exists) {
+      h += `<div class="ds-overall">
+        <div class="ds-ov-top"><span>إنجاز اليوم</span><b>${st.pct}%</b></div>
+        <div class="ds-bar"><i style="width:${st.pct}%"></i></div>
+        <div class="ds-ov-sub">مهام ${st.td}/${st.tt} • عادات ${st.hd}/${st.ht}</div>
+      </div>`;
+    }
 
-    // تعديل
-    card.querySelector('.edit-btn').addEventListener('click', e => {
-      e.stopPropagation(); openPlanPopup(subj);
-    });
-
-    // حذف
-    card.querySelector('.plan-del-btn').addEventListener('click', e => {
-      e.stopPropagation();
-      if (!confirm(`حذف "${subj.name}"؟`)) return;
-      let data2 = getPlan(planState.viewDate).filter(s=>s.id!==subj.id);
-      savePlan(planState.viewDate, data2);
-      if (subj.tplId) saveTemplates(getTemplates().filter(t=>t.id!==subj.tplId));
-      renderPlanPage();
-    });
-
-    // تفعيل موضوع
-    card.querySelectorAll('.plan-topic-item').forEach(item => {
-      item.addEventListener('click', e => {
-        if (e.target.classList.contains('plan-topic-del')) return;
-        _toggleTopic(subj.id, item.dataset.tid);
-      });
-    });
-
-    // حذف موضوع
-    card.querySelectorAll('.plan-topic-del').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        _deleteTopic(subj.id, btn.dataset.tid);
-      });
-    });
-
-    // إضافة موضوع سريع
-    const inp = card.querySelector('.plan-inline-input');
-    const addBtn = card.querySelector('.plan-inline-add-btn');
-    const doAdd = () => {
-      const txt = inp.value.trim(); if (!txt) return;
-      _addTopic(subj.id, txt); inp.value=''; inp.focus();
-    };
-    addBtn.addEventListener('click', doAdd);
-    inp.addEventListener('keydown', e => { if(e.key==='Enter'){e.preventDefault();doAdd();} });
-
-    container.appendChild(card);
-  });
-}
-
-function _subjProgress(subj) {
-  const total = subj.topics.length;
-  const done  = subj.topics.filter(t=>t.done).length;
-  return {total, done, pct: total ? Math.round(done/total*100) : 0};
-}
-
-function _esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function _updateSubj(subj) {
-  const data = getPlan(planState.viewDate);
-  const i    = data.findIndex(s=>s.id===subj.id);
-  if (i>=0) { data[i]=subj; savePlan(planState.viewDate,data); }
-}
-
-function _toggleTopic(subjId, topicId) {
-  const data = getPlan(planState.viewDate);
-  const subj = data.find(s=>s.id===subjId);
-  if (!subj) return;
-  const t = subj.topics.find(x=>x.id===topicId);
-  if (t) t.done = !t.done;
-  savePlan(planState.viewDate, data);
-  renderPlanPage();
-}
-
-function _deleteTopic(subjId, topicId) {
-  const data = getPlan(planState.viewDate);
-  const subj = data.find(s=>s.id===subjId);
-  if (!subj) return;
-  subj.topics = subj.topics.filter(t=>t.id!==topicId);
-  savePlan(planState.viewDate, data);
-  renderPlanPage();
-}
-
-function _addTopic(subjId, text) {
-  const data = getPlan(planState.viewDate);
-  const subj = data.find(s=>s.id===subjId);
-  if (!subj) return;
-  subj.topics.push({id:planUID(), text, done:false});
-  savePlan(planState.viewDate, data);
-  renderPlanPage();
-}
-
-// ==========================================
-// بوب آب الخطة — نظام الخطوات الواضح
-// ==========================================
-
-function openPlanPopup(existing=null) {
-  planState.editId  = existing ? existing.id : null;
-  planState.color   = existing ? existing.color : '#6c63ff';
-  planState.days    = existing ? [...existing.days] : [];
-  planState.topics  = existing ? existing.topics.map(t=>({id:t.id,text:t.text})) : [];
-
-  document.getElementById('planPopupTitle').textContent =
-    existing ? `✏️ تعديل: ${existing.name}` : '📚 إضافة مادة';
-  document.getElementById('planSubjectName').value = existing ? existing.name : '';
-  document.getElementById('planTopicInput').value  = '';
-
-  _setColor(planState.color);
-  document.querySelectorAll('.plan-day-btn').forEach(btn =>
-    btn.classList.toggle('active', planState.days.includes(parseInt(btn.dataset.day))));
-  _renderPendingTopics();
-  _gotoStep(1);
-  _showPlanPopup();
-}
-
-function _showPlanPopup() {
-  state.activePopup = 'plan';
-  document.getElementById('overlay').classList.add('active');
-  document.getElementById('planPopup').classList.add('active');
-}
-
-function _hidePlanPopup() {
-  state.activePopup = null;
-  document.getElementById('overlay').classList.remove('active');
-  document.getElementById('planPopup').classList.remove('active');
-}
-
-function _gotoStep(n) {
-  planState.step = n;
-  // شريط الخطوات
-  document.querySelectorAll('.plan-step').forEach(el => {
-    const s = parseInt(el.dataset.step);
-    el.classList.toggle('active', s===n);
-    el.classList.toggle('done',   s<n);
-  });
-  // اللوحات
-  document.querySelectorAll('.plan-step-panel').forEach(el => el.classList.remove('active'));
-  const panel = document.getElementById('planStep'+n);
-  if (panel) panel.classList.add('active');
-  // أزرار
-  document.getElementById('planPrevStep').style.display    = n>1    ? '' : 'none';
-  document.getElementById('planNextStep').style.display    = n<4    ? '' : 'none';
-  document.getElementById('planSaveSubject').style.display = n===4  ? '' : 'none';
-  // فوكس
-  setTimeout(() => {
-    if (n===1) document.getElementById('planSubjectName').focus();
-    if (n===4) document.getElementById('planTopicInput').focus();
-  }, 60);
-}
-
-function _planNext() {
-  if (planState.step===1) {
-    const n = document.getElementById('planSubjectName').value.trim();
-    if (!n) { document.getElementById('planSubjectName').focus(); return; }
-  }
-  if (planState.step<4) _gotoStep(planState.step+1);
-}
-
-function _planPrev() {
-  if (planState.step>1) _gotoStep(planState.step-1);
-}
-
-function _setColor(color) {
-  planState.color = color;
-  document.querySelectorAll('.plan-color-choice').forEach(el =>
-    el.classList.toggle('selected', el.dataset.color===color));
-  const dot  = document.getElementById('planColorPreview');
-  const name = document.getElementById('planColorName');
-  if (dot)  dot.style.background = color;
-  if (name) name.textContent = PLAN_COLOR_NAMES[color]||color;
-}
-
-function _toggleDay(day) {
-  if (planState.days.includes(day)) planState.days = planState.days.filter(d=>d!==day);
-  else planState.days.push(day);
-  document.querySelectorAll('.plan-day-btn').forEach(btn =>
-    btn.classList.toggle('active', planState.days.includes(parseInt(btn.dataset.day))));
-}
-
-function _addPendingTopic() {
-  const inp  = document.getElementById('planTopicInput');
-  const text = inp.value.trim();
-  if (!text) return;
-  planState.topics.push({id:planUID(), text});
-  _renderPendingTopics();
-  inp.value=''; inp.focus();
-}
-
-function _renderPendingTopics() {
-  const list = document.getElementById('planTopicsList');
-  list.innerHTML = '';
-  planState.topics.forEach((t,i) => {
-    const div = document.createElement('div');
-    div.className = 'plan-topic-pill';
-    div.innerHTML = `<span class="plan-topic-pill-num">${i+1}.</span>
-      <span>${_esc(t.text)}</span>
-      <button data-id="${t.id}">✕</button>`;
-    div.querySelector('button').addEventListener('click', () => {
-      planState.topics = planState.topics.filter(x=>x.id!==t.id);
-      _renderPendingTopics();
-    });
-    list.appendChild(div);
-  });
-}
-
-function savePlanSubject() {
-  const name = document.getElementById('planSubjectName').value.trim();
-  if (!name) { _gotoStep(1); return; }
-
-  const data = getPlan(planState.viewDate);
-
-  if (planState.editId) {
-    // تعديل
-    const idx = data.findIndex(s=>s.id===planState.editId);
-    if (idx>=0) {
-      const old = data[idx];
-      // احتفظ بحالة done للمواضيع المشتركة
-      const doneMap = {};
-      old.topics.forEach(t => { doneMap[t.id]=t.done; });
-      data[idx] = {
-        ...old, name, color:planState.color, days:[...planState.days],
-        topics: planState.topics.map(t=>({id:t.id,text:t.text,done:doneMap[t.id]||false}))
-      };
-      // حدّث القالب
-      if (old.tplId) {
-        const tpls = getTemplates();
-        const ti   = tpls.findIndex(t=>t.id===old.tplId);
-        if (ti>=0) {
-          tpls[ti] = {...tpls[ti], name, color:planState.color, days:[...planState.days],
-            topics:planState.topics.map(t=>({id:planUID(),text:t.text}))};
-          saveTemplates(tpls);
+    // المواد
+    h += '<div class="ds-sec-title">📚 المواد الدراسية</div>';
+    if (!rec.subjects.length) {
+      h += `<div class="ds-empty">${mode === 'past' ? 'لا توجد مواد في هذا اليوم' : 'لم تختر مواد لهذا اليوم بعد'}</div>`;
+    }
+    rec.subjects.forEach(s => {
+      const ss = subjStat(s), open = !ui.closed[s.key], complete = ss.t > 0 && ss.d === ss.t;
+      h += `<div class="ds-subj${open ? '' : ' closed'}${complete ? ' complete' : ''}" style="--c:${esc(s.color)}">
+        <div class="ds-subj-head" data-a="tsubj" data-k="${esc(s.key)}" role="button" tabindex="0">
+          <span class="ds-dot"></span>
+          <span class="ds-subj-name">${esc(s.name)}</span>
+          <span class="ds-subj-meta">${complete ? '✔ مكتملة' : ss.d + '/' + ss.t}</span>
+          <span class="ds-mini-bar"><i style="width:${ss.pct}%"></i></span>
+          <span class="ds-chev">▾</span>
+        </div>
+        <div class="ds-subj-body">`;
+      if (!s.tasks.length) h += '<div class="ds-empty ds-empty-sm">لا توجد مهام بعد</div>';
+      s.tasks.forEach(t => {
+        const ed = S.editing && S.editing.t === 'task' && S.editing.id === t.id;
+        if (ed) {
+          h += `<div class="ds-task editing" data-k="${esc(s.key)}" data-id="${esc(t.id)}">
+            <input class="ds-in" data-edit="text" value="${esc(t.text)}" maxlength="80" placeholder="اسم المهمة">
+            <input class="ds-in ds-in-n" data-edit="count" type="number" min="1" max="99" value="${t.count || ''}" placeholder="عدد">
+            <button class="ds-icon-btn" data-a="saveedit" title="حفظ">✓</button>
+            <button class="ds-icon-btn" data-a="canceledit" title="إلغاء">✕</button>
+          </div>`;
+        } else {
+          h += `<div class="ds-task${t.done ? ' done' : ''}">
+            <button class="ds-check" data-a="ttask" data-k="${esc(s.key)}" data-id="${esc(t.id)}" aria-pressed="${!!t.done}" ${canCheck ? '' : 'disabled'}>✓</button>
+            <span class="ds-task-text">${esc(t.text)}</span>
+            ${t.count ? `<span class="ds-count" title="عدد المحاضرات / الدروس">× ${t.count}</span>` : ''}
+            ${editable ? `<span class="ds-row-btns">
+              <button class="ds-icon-btn ds-sm" data-a="edittask" data-k="${esc(s.key)}" data-id="${esc(t.id)}" title="تعديل">✏️</button>
+              <button class="ds-icon-btn ds-sm" data-a="deltask" data-k="${esc(s.key)}" data-id="${esc(t.id)}" title="حذف">🗑</button>
+            </span>` : ''}
+          </div>`;
         }
+      });
+      if (editable) {
+        h += `<div class="ds-add"><input class="ds-in" data-add="${esc(s.key)}" placeholder="أضف مهمة…" maxlength="80">
+          <button class="ds-icon-btn" data-a="addtask" data-k="${esc(s.key)}" title="إضافة">+</button></div>`;
       }
-    }
-  } else {
-    // جديد
-    const tplId = planUID();
-    data.push({
-      id:planUID(), tplId, name, color:planState.color,
-      days:[...planState.days], collapsed:false,
-      topics:planState.topics.map(t=>({id:planUID(),text:t.text,done:false}))
+      h += '</div></div>';
     });
-    if (planState.days.length>0) {
-      const tpls = getTemplates();
-      tpls.push({id:tplId, name, color:planState.color, days:[...planState.days],
-        topics:planState.topics.map(t=>({id:planUID(),text:t.text}))});
-      saveTemplates(tpls);
+
+    // العادات
+    const hOpen = !ui.closed.habits;
+    h += `<div class="ds-subj ds-habits${hOpen ? '' : ' closed'}" style="--c:#4ade80">
+      <div class="ds-subj-head" data-a="thabits" role="button" tabindex="0">
+        <span class="ds-dot"></span><span class="ds-subj-name">🔁 Daily Habits</span>
+        <span class="ds-subj-meta">${st.hd}/${st.ht}</span>
+        <span class="ds-mini-bar"><i style="width:${st.ht ? Math.round(st.hd / st.ht * 100) : 0}%"></i></span>
+        <span class="ds-chev">▾</span>
+      </div>
+      <div class="ds-subj-body">`;
+    if (!rec.habits.length) {
+      h += `<div class="ds-empty ds-empty-sm">${mode === 'today' ? 'أضف عاداتك الثابتة (مثل: الاستيقاظ، التمرين، القراءة، شرب الماء) وستظهر تلقائيًا كل يوم' : 'لا توجد عادات'}</div>`;
+    }
+    rec.habits.forEach(x => {
+      const ed = S.editing && S.editing.t === 'habit' && S.editing.id === x.id && mode === 'today';
+      if (ed) {
+        h += `<div class="ds-task editing" data-id="${esc(x.id)}">
+          <input class="ds-in" data-edit="hname" value="${esc(x.name)}" maxlength="40" placeholder="اسم العادة">
+          <button class="ds-icon-btn" data-a="saveedit" title="حفظ">✓</button>
+          <button class="ds-icon-btn" data-a="canceledit" title="إلغاء">✕</button>
+        </div>`;
+      } else {
+        const conf = S.confirm === 'h:' + x.id;
+        h += `<div class="ds-task${x.done ? ' done' : ''}">
+          <button class="ds-check" data-a="thabit" data-id="${esc(x.id)}" aria-pressed="${!!x.done}" ${canCheck ? '' : 'disabled'}>✓</button>
+          <span class="ds-task-text">${esc(x.name)}</span>
+          ${mode === 'today' ? `<span class="ds-row-btns">
+            <button class="ds-icon-btn ds-sm" data-a="edithabit" data-id="${esc(x.id)}" title="تعديل">✏️</button>
+            <button class="ds-icon-btn ds-sm${conf ? ' ds-danger' : ''}" data-a="delhabit" data-id="${esc(x.id)}" title="حذف">${conf ? 'تأكيد؟' : '🗑'}</button>
+          </span>` : ''}
+        </div>`;
+      }
+    });
+    if (mode === 'today') {
+      h += `<div class="ds-add"><input class="ds-in" data-addhabit="1" placeholder="عادة جديدة…" maxlength="40">
+        <button class="ds-icon-btn" data-a="addhabit" title="إضافة عادة">+</button></div>`;
+    } else if (mode === 'future') {
+      h += '<div class="ds-empty ds-empty-sm">العادات تتكرر تلقائيًا في كل يوم</div>';
+    }
+    h += '</div></div>';
+
+    body.innerHTML = h;
+    body.scrollTop = scroll;
+
+    if (S.refocus) { const el = body.querySelector(S.refocus); S.refocus = null; if (el) { el.focus(); if (el.select && el.dataset.edit) el.select(); } }
+  }
+
+  function findSubj(rec, k) { return rec.subjects.find(s => s.key === k); }
+  const clampCount = v => { const n = parseInt(v, 10); return n >= 1 ? Math.min(n, 99) : null; };
+
+  function act(a, d) {
+    const mode = modeOf(S.view);
+    switch (a) {
+      case 'prev': S.view = shiftDate(S.view, -1); S.editing = null; render(); break;
+      case 'next': if (S.view < shiftDate(todayKey(), MAX_AHEAD)) { S.view = shiftDate(S.view, 1); S.editing = null; render(); } break;
+      case 'gotoday': S.view = todayKey(); S.editing = null; render(); break;
+      case 'tsubj': ui.closed[d.k] = !ui.closed[d.k]; saveUI(); render(); break;
+      case 'thabits': ui.closed.habits = !ui.closed.habits; saveUI(); render(); break;
+      case 'ttask':
+        if (mode !== 'today') break;
+        mutate(S.view, r => { const s = findSubj(r, d.k), t = s && s.tasks.find(x => x.id === d.id); if (t) t.done = !t.done; });
+        render(); break;
+      case 'thabit':
+        if (mode !== 'today') break;
+        mutate(S.view, r => { const x = r.habits.find(y => y.id === d.id); if (x) x.done = !x.done; });
+        render(); break;
+      case 'addtask': {
+        if (mode === 'past') break;
+        const inp = $('dsBody').querySelector(`[data-add="${d.k}"]`), text = inp ? inp.value.trim() : '';
+        if (!text) { if (inp) inp.focus(); break; }
+        mutate(S.view, r => { const s = findSubj(r, d.k); if (s) s.tasks.push({ id: uid(), text, count: null, done: false }); });
+        S.refocus = `[data-add="${d.k}"]`; render(); break;
+      }
+      case 'edittask': S.editing = { t: 'task', k: d.k, id: d.id }; S.refocus = '[data-edit="text"]'; render(); break;
+      case 'edithabit': S.editing = { t: 'habit', id: d.id }; S.refocus = '[data-edit="hname"]'; render(); break;
+      case 'canceledit': S.editing = null; render(); break;
+      case 'saveedit': saveEdit(); break;
+      case 'deltask':
+        mutate(S.view, r => { const s = findSubj(r, d.k); if (s) s.tasks = s.tasks.filter(x => x.id !== d.id); });
+        render(); break;
+      case 'addhabit': {
+        if (mode !== 'today') break;
+        const inp = $('dsBody').querySelector('[data-addhabit]'), name = inp ? inp.value.trim() : '';
+        if (!name) { if (inp) inp.focus(); break; }
+        const hs = getHabits(); hs.push({ id: uid(), name });
+        if (!saveHabits(hs)) break;
+        S.refocus = '[data-addhabit]'; render(); break;
+      }
+      case 'delhabit': {
+        if (mode !== 'today') break;
+        const key = 'h:' + d.id;
+        if (S.confirm !== key) { S.confirm = key; render(); setTimeout(() => { if (S.confirm === key) { S.confirm = null; render(); } }, 3000); break; }
+        S.confirm = null;
+        saveHabits(getHabits().filter(x => x.id !== d.id)); render(); break;
+      }
+      case 'prepare': openPrepare(mode === 'past' ? todayKey() : S.view); break;
+      case 'history': openHistory(); break;
+      case 'bell': openReminder(); break;
     }
   }
 
-  savePlan(planState.viewDate, data);
-  _hidePlanPopup();
-  renderPlanPage();
-}
-
-// ==========================================
-// أحداث صفحة الخطة
-// ==========================================
-
-function setupPlanEvents() {
-  // التنقل
-  document.getElementById('planPrevDay').addEventListener('click',  () => { planState.viewDate=shiftDate(planState.viewDate,-1); renderPlanPage(); });
-  document.getElementById('planNextDay').addEventListener('click',  () => { planState.viewDate=shiftDate(planState.viewDate,+1); renderPlanPage(); });
-  document.getElementById('planGoToday').addEventListener('click',  () => { planState.viewDate=todayKey(); renderPlanPage(); });
-  document.getElementById('planOpenAdd').addEventListener('click',  () => openPlanPopup());
-
-  // أزرار البوب آب
-  document.getElementById('planNextStep').addEventListener('click',    _planNext);
-  document.getElementById('planPrevStep').addEventListener('click',    _planPrev);
-  document.getElementById('planSaveSubject').addEventListener('click', savePlanSubject);
-  document.getElementById('closePlanPopup').addEventListener('click',  _hidePlanPopup);
-
-  // ألوان
-  document.querySelectorAll('.plan-color-choice').forEach(btn =>
-    btn.addEventListener('click', () => _setColor(btn.dataset.color)));
-
-  // أيام
-  document.querySelectorAll('.plan-day-btn').forEach(btn =>
-    btn.addEventListener('click', () => _toggleDay(parseInt(btn.dataset.day))));
-
-  // إضافة موضوع
-  document.getElementById('planAddTopicBtn').addEventListener('click', _addPendingTopic);
-
-  // ---- كيبورد داخل البوب آب ----
-  document.getElementById('planPopup').addEventListener('keydown', e => {
-    if (state.activePopup !== 'plan') return;
-    const activeId = document.activeElement.id;
-    const inName   = activeId === 'planSubjectName';
-    const inTopic  = activeId === 'planTopicInput';
-
-    // Ctrl+Enter — حفظ من أي مكان
-    if ((e.ctrlKey||e.metaKey) && e.key==='Enter') { e.preventDefault(); savePlanSubject(); return; }
-
-    // Enter
-    if (e.key==='Enter') {
-      e.preventDefault();
-      if (inTopic) { _addPendingTopic(); return; }
-      _planNext();
-      return;
+  function saveEdit() {
+    const body = $('dsBody'), e = S.editing;
+    if (!e) return;
+    if (e.t === 'task') {
+      const text = (body.querySelector('[data-edit="text"]') || {}).value, cnt = (body.querySelector('[data-edit="count"]') || {}).value;
+      if (!text || !text.trim()) { body.querySelector('[data-edit="text"]').focus(); return; }
+      mutate(S.view, r => { const s = findSubj(r, e.k), t = s && s.tasks.find(x => x.id === e.id); if (t) { t.text = text.trim(); t.count = clampCount(cnt); } });
+    } else {
+      const name = (body.querySelector('[data-edit="hname"]') || {}).value;
+      if (!name || !name.trim()) { body.querySelector('[data-edit="hname"]').focus(); return; }
+      saveHabits(getHabits().map(x => x.id === e.id ? { ...x, name: name.trim() } : x));
     }
+    S.editing = null; render();
+  }
 
-    // ArrowLeft (رجوع في الخطوات) — فقط خارج الإن بوت
-    if (e.key==='ArrowLeft' && !inName && !inTopic) { e.preventDefault(); _planPrev(); return; }
+  function bindPanel() {
+    const body = $('dsBody');
+    body.addEventListener('click', e => {
+      const b = e.target.closest('[data-a]');
+      if (!b || b.disabled) return;
+      act(b.dataset.a, b.dataset);
+    });
+    body.addEventListener('keydown', e => {
+      const t = e.target;
+      if ((e.key === 'Enter' || e.key === ' ') && t.matches && t.matches('.ds-subj-head')) { e.preventDefault(); act(t.dataset.a, t.dataset); return; }
+      if (e.key === 'Enter') {
+        if (t.dataset.add) { e.preventDefault(); act('addtask', { k: t.dataset.add }); }
+        else if (t.dataset.addhabit) { e.preventDefault(); act('addhabit', {}); }
+        else if (t.dataset.edit) { e.preventDefault(); saveEdit(); }
+      } else if (e.key === 'Escape' && t.dataset.edit) { e.preventDefault(); e.stopPropagation(); S.editing = null; render(); }
+    });
+    $('dsCollapseBtn').addEventListener('click', e => { e.stopPropagation(); togglePanel(); });
+    $('dsHead').addEventListener('click', () => { if (collapsedNow()) togglePanel(); });
+  }
 
-    // Backspace في المواضيع الفارغ
-    if (e.key==='Backspace' && inTopic) {
-      const inp = document.getElementById('planTopicInput');
-      if (inp.value==='' && planState.topics.length>0) {
-        e.preventDefault(); planState.topics.pop(); _renderPendingTopics();
+  function togglePanel() { ui.collapsed = !collapsedNow(); saveUI(); render(); }
+
+  /* =====================================================
+     النوافذ
+     ===================================================== */
+  const MODALS = { prepare: 'dsPrepare', reminder: 'dsReminder', history: 'dsHistory' };
+  function showModal(name) {
+    Object.keys(MODALS).forEach(k => $(MODALS[k]).classList.toggle('active', k === name));
+    $('dsOverlay').classList.add('active');
+    S.modal = name; S.escArm = false;
+    setTimeout(() => { const m = $(MODALS[name]); if (m && !m.contains(document.activeElement)) m.focus(); }, 30);
+  }
+  function closeModal(force) {
+    Object.keys(MODALS).forEach(k => $(MODALS[k]).classList.remove('active'));
+    $('dsOverlay').classList.remove('active');
+    S.modal = null; S.draft = null; S.escArm = false;
+    $('dsPrepMsg').textContent = '';
+    if (S.pendingReminder && !force && !state.activePopup) { S.pendingReminder = false; setTimeout(openReminder, 250); }
+  }
+
+  /* ---------- نافذة التذكير ---------- */
+  function openReminder() {
+    const rec = getView(todayKey()), st = stats(rec), prepared = isPrepared(rec);
+    $('dsReminder').classList.toggle('ready', prepared);
+    $('dsRemIcon').textContent = prepared ? '🌟' : '⏰';
+    $('dsRemTitle').textContent = prepared ? 'جدولك اليومي جاهز، ابدأ بإنجاز مهامك!' : 'لم تجهز جدول اليوم بعد، جهّز مهامك حتى تبدأ يومك.';
+    $('dsRemText').textContent = dateStr(todayKey());
+    let sum = '';
+    if (prepared) {
+      sum += '<div class="ds-sum-chips">' + rec.subjects.map(s => {
+        const x = subjStat(s);
+        return `<span class="ds-sum-chip" style="--c:${esc(s.color)}">${esc(s.name)} <b>${x.d}/${x.t}</b></span>`;
+      }).join('') + '</div>';
+      sum += `<div class="ds-sum-line">📚 ${rec.subjects.length} مواد • ${st.tt} مهمة (${st.td} منجزة)</div>`;
+    }
+    sum += st.ht ? `<div class="ds-sum-line">🔁 ${st.ht} عادات يومية (${st.hd} منجزة)</div>`
+                 : '<div class="ds-sum-line muted">لم تضف عادات يومية بعد</div>';
+    $('dsRemSummary').innerHTML = sum;
+    $('dsRemBtns').innerHTML = prepared
+      ? `<button class="ds-btn ds-btn-primary" data-r="open">📅 فتح الجدول</button>
+         <button class="ds-btn" data-r="edit">✏️ تعديل الجدول</button>
+         <button class="ds-btn" data-r="close">إغلاق</button>`
+      : `<button class="ds-btn ds-btn-primary" data-r="prep">📝 Prepare Today's Schedule</button>
+         <button class="ds-btn" data-r="close">لاحقًا</button>`;
+    showModal('reminder');
+  }
+  function remAction(r) {
+    if (r === 'close') { closeModal(); return; }
+    if (r === 'prep' || r === 'edit') { S.view = todayKey(); closeModal(true); openPrepare(todayKey()); return; }
+    if (r === 'open') {
+      S.view = todayKey(); ui.collapsed = false; saveUI(); closeModal(true); render();
+      const p = $('dsPanel'); p.classList.remove('flash'); void p.offsetWidth; p.classList.add('flash');
+      if (!isWide()) window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
+  /* ---------- نافذة تجهيز الجدول ---------- */
+  function openPrepare(dk) {
+    dk = dk || S.view;
+    if (dk < todayKey()) dk = todayKey();
+    const rec = getView(dk);
+    S.draft = { dk, subjects: JSON.parse(JSON.stringify(rec.subjects)) };
+    S.draft.subjects.forEach(s => s.tasks.forEach(t => { if (!t.id) t.id = uid(); }));
+    S.draftStart = JSON.stringify(S.draft.subjects);
+    S.stash = {};
+    const isT = dk === todayKey();
+    $('dsPrepTitle').textContent = isT ? "📝 Prepare Today's Schedule" : '📝 Prepare Schedule';
+    $('dsPrepSub').textContent = dateStr(dk) + ' — اختر المواد، أضف مهامها، رتّبها، ثم احفظ';
+    $('dsPrepMsg').textContent = '';
+    renderPrepare();
+    showModal('prepare');
+    setTimeout(() => { const f = $('dsPrepBody').querySelector('[data-padd]') || $('dsPrepBody').querySelector('.ds-chip'); if (f) f.focus(); }, 60);
+  }
+
+  function renderPrepare() {
+    const body = $('dsPrepBody'), sc = body.scrollTop, d = S.draft;
+    if (!d) return;
+    // لا نفقد ما كُتب في خانات الإضافة عند إعادة الرسم (ترتيب/إضافة مادة...)
+    const keep = {};
+    body.querySelectorAll('[data-padd],[data-pcount]').forEach(i => { if (i.value) keep[i.dataset.padd ? 'a' + i.dataset.padd : 'c' + i.dataset.pcount] = i.value; });
+    let h = '<div class="ds-hint">1) اختر المواد التي تريد دراستها اليوم &nbsp;•&nbsp; 2) أضف المهام أو المحاضرات &nbsp;•&nbsp; 3) رتّبها بالأسهم ▲▼</div><div class="ds-chips">';
+    SUBJECTS.forEach(s => {
+      const on = d.subjects.some(x => x.key === s.key);
+      h += `<button type="button" class="ds-chip${on ? ' on' : ''}" style="--c:${s.color}" data-a="psubj" data-k="${s.key}" aria-pressed="${on}">${on ? '✓ ' : ''}${esc(s.name)}</button>`;
+    });
+    h += '</div>';
+    if (!d.subjects.length) h += '<div class="ds-empty">اضغط على مادة من الأعلى لإضافتها إلى جدول اليوم</div>';
+    d.subjects.forEach((s, si) => {
+      h += `<div class="ds-pcard" style="--c:${esc(s.color)}" data-k="${esc(s.key)}">
+        <div class="ds-pcard-head">
+          <span class="ds-dot"></span><b>${esc(s.name)}</b>${s.legacy ? '<span class="ds-tag">من الخطة القديمة</span>' : ''}
+          <span class="ds-pc-count">${s.tasks.length} مهمة</span>
+          <span class="ds-row-btns on">
+            <button class="ds-icon-btn ds-sm" data-a="psup" data-k="${esc(s.key)}" title="للأعلى" ${si === 0 ? 'disabled' : ''}>▲</button>
+            <button class="ds-icon-btn ds-sm" data-a="psdown" data-k="${esc(s.key)}" title="للأسفل" ${si === d.subjects.length - 1 ? 'disabled' : ''}>▼</button>
+            <button class="ds-icon-btn ds-sm" data-a="psrm" data-k="${esc(s.key)}" title="إزالة المادة من اليوم">✕</button>
+          </span>
+        </div>`;
+      s.tasks.forEach((t, ti) => {
+        h += `<div class="ds-prow" data-k="${esc(s.key)}" data-id="${esc(t.id)}">
+          <span class="ds-pnum">${ti + 1}.</span>
+          <input class="ds-in" data-f="text" value="${esc(t.text)}" maxlength="80" placeholder="اسم المهمة أو المحاضرة">
+          <input class="ds-in ds-in-n" data-f="count" type="number" min="1" max="99" value="${t.count || ''}" placeholder="عدد" title="عدد المحاضرات / الدروس (اختياري)">
+          <span class="ds-row-btns on">
+            <button class="ds-icon-btn ds-sm" data-a="ptup" data-k="${esc(s.key)}" data-id="${esc(t.id)}" ${ti === 0 ? 'disabled' : ''}>▲</button>
+            <button class="ds-icon-btn ds-sm" data-a="ptdown" data-k="${esc(s.key)}" data-id="${esc(t.id)}" ${ti === s.tasks.length - 1 ? 'disabled' : ''}>▼</button>
+            <button class="ds-icon-btn ds-sm" data-a="ptdel" data-k="${esc(s.key)}" data-id="${esc(t.id)}">🗑</button>
+          </span>
+        </div>`;
+      });
+      h += `<div class="ds-prow ds-padd">
+          <input class="ds-in" data-padd="${esc(s.key)}" maxlength="80" placeholder="＋ مهمة أو محاضرة جديدة (Enter للإضافة)">
+          <input class="ds-in ds-in-n" data-pcount="${esc(s.key)}" type="number" min="1" max="99" placeholder="عدد" title="عدد المحاضرات / الدروس (اختياري)">
+          <button class="ds-btn ds-btn-sm" data-a="ptadd" data-k="${esc(s.key)}">+ إضافة</button>
+        </div></div>`;
+    });
+    body.innerHTML = h;
+    body.scrollTop = sc;
+    body.querySelectorAll('[data-padd],[data-pcount]').forEach(i => {
+      const v = keep[i.dataset.padd ? 'a' + i.dataset.padd : 'c' + i.dataset.pcount]; if (v) i.value = v;
+    });
+  }
+
+  function prepAddTask(k) {
+    const body = $('dsPrepBody'), inp = body.querySelector(`[data-padd="${k}"]`), cnt = body.querySelector(`[data-pcount="${k}"]`);
+    const s = S.draft.subjects.find(x => x.key === k);
+    if (!s || !inp) return false;
+    const text = inp.value.trim();
+    if (!text) { inp.focus(); return false; }
+    s.tasks.push({ id: uid(), text, count: clampCount(cnt && cnt.value), done: false });
+    inp.value = ''; if (cnt) cnt.value = '';
+    renderPrepare();
+    const n = $('dsPrepBody').querySelector(`[data-padd="${k}"]`); if (n) n.focus();
+    return true;
+  }
+  function move(arr, i, dir) { const j = i + dir; if (j < 0 || j >= arr.length) return; [arr[i], arr[j]] = [arr[j], arr[i]]; }
+
+  function prepAct(a, d) {
+    const dr = S.draft; if (!dr) return;
+    const subj = dr.subjects.find(x => x.key === d.k);
+    switch (a) {
+      case 'psubj': {
+        if (subj) { S.stash[d.k] = subj; dr.subjects = dr.subjects.filter(x => x.key !== d.k); renderPrepare(); break; }
+        const def = SUBJECTS.find(x => x.key === d.k);
+        dr.subjects.push(S.stash[d.k] || { key: def.key, name: def.name, color: def.color, tasks: [] });
+        renderPrepare();
+        const f = $('dsPrepBody').querySelector(`[data-padd="${d.k}"]`); if (f) f.focus();
+        break;
       }
+      case 'psrm': dr.subjects = dr.subjects.filter(x => x.key !== d.k); if (!subj.legacy) S.stash[d.k] = subj; renderPrepare(); break;
+      case 'psup': move(dr.subjects, dr.subjects.indexOf(subj), -1); renderPrepare(); break;
+      case 'psdown': move(dr.subjects, dr.subjects.indexOf(subj), 1); renderPrepare(); break;
+      case 'ptup': move(subj.tasks, subj.tasks.findIndex(t => t.id === d.id), -1); renderPrepare(); break;
+      case 'ptdown': move(subj.tasks, subj.tasks.findIndex(t => t.id === d.id), 1); renderPrepare(); break;
+      case 'ptdel': subj.tasks = subj.tasks.filter(t => t.id !== d.id); renderPrepare(); break;
+      case 'ptadd': prepAddTask(d.k); break;
+    }
+  }
+
+  function prepDirty() {
+    if (!S.draft) return false;
+    const body = $('dsPrepBody');
+    if ([...body.querySelectorAll('[data-padd]')].some(i => i.value.trim())) return true;
+    return JSON.stringify(S.draft.subjects) !== S.draftStart;
+  }
+  function requestClosePrepare() {
+    if (prepDirty() && !S.escArm) {
+      S.escArm = true; $('dsPrepMsg').textContent = 'توجد تغييرات غير محفوظة — اضغط Esc مرة أخرى للإلغاء';
       return;
     }
+    closeModal();
+  }
 
-    // لا اختصارات داخل إن بوت
-    if (inName || inTopic) return;
+  function savePrepare() {
+    const dr = S.draft; if (!dr) return;
+    const body = $('dsPrepBody');
+    // ما كُتب في خانة الإضافة ولم يُضَف بعد لا يضيع
+    dr.subjects.forEach(s => {
+      const inp = body.querySelector(`[data-padd="${s.key}"]`), cnt = body.querySelector(`[data-pcount="${s.key}"]`);
+      if (inp && inp.value.trim()) s.tasks.push({ id: uid(), text: inp.value.trim(), count: clampCount(cnt && cnt.value), done: false });
+    });
+    dr.subjects.forEach(s => { s.tasks = s.tasks.map(t => ({ id: t.id, text: String(t.text || '').trim(), count: clampCount(t.count), done: !!t.done })).filter(t => t.text); });
+    if (!dr.subjects.length) { $('dsPrepMsg').textContent = '⚠️ اختر مادة واحدة على الأقل'; return; }
+    if (dr.dk < todayKey()) { dr.dk = todayKey(); toast('بدأ يوم جديد — تم حفظ الجدول في اليوم الحالي'); }
+    mutate(dr.dk, r => { r.subjects = dr.subjects; r.prepared = true; });
+    S.view = dr.dk; S.editing = null;
+    closeModal(true); render();
+    toast('✅ تم حفظ الجدول');
+  }
 
-    // خطوة 2 — أرقام لاختيار اللون
-    if (planState.step===2 && e.key>='1' && e.key<='8') {
-      e.preventDefault();
-      const btn = document.querySelector(`.plan-color-choice:nth-child(${e.key})`);
-      if (btn) _setColor(btn.dataset.color);
-      return;
+  function bindPrepare() {
+    const body = $('dsPrepBody');
+    body.addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (b && !b.disabled) prepAct(b.dataset.a, b.dataset); });
+    body.addEventListener('input', e => {
+      const t = e.target; if (!t.dataset.f || !S.draft) return;
+      const row = t.closest('.ds-prow'), s = S.draft.subjects.find(x => x.key === row.dataset.k), task = s && s.tasks.find(x => x.id === row.dataset.id);
+      if (!task) return;
+      if (t.dataset.f === 'text') task.text = t.value; else task.count = clampCount(t.value);
+      S.escArm = false;
+    });
+    body.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' || e.ctrlKey || e.metaKey) return;
+      const t = e.target;
+      if (t.dataset.padd) { e.preventDefault(); prepAddTask(t.dataset.padd); }
+      else if (t.dataset.pcount) { e.preventDefault(); prepAddTask(t.dataset.pcount); }
+      else if (t.dataset.f) { e.preventDefault(); }
+    });
+    $('dsPrepSave').addEventListener('click', savePrepare);
+    $('dsPrepCancel').addEventListener('click', requestClosePrepare);
+    $('dsPrepClose').addEventListener('click', requestClosePrepare);
+  }
+
+  /* ---------- السجل ---------- */
+  function openHistory() {
+    const t = todayKey(), dks = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(K_DAY)) { const dk = k.slice(K_DAY.length); if (/^\d{4}-\d{2}-\d{2}$/.test(dk) && dk <= t) dks.push(dk); }
     }
+    dks.sort().reverse();
+    let h = '', n = 0;
+    dks.slice(0, 120).forEach(dk => {
+      const rec = getView(dk), st = stats(rec);
+      if (!st.tt && !st.ht) return;
+      n++;
+      h += `<button class="ds-hrow" data-dk="${dk}">
+        <div class="ds-hrow-top"><b>${esc(relLabel(dk))}</b><span>${esc(dateStr(dk))}</span><span class="ds-hpct">${st.pct}%</span></div>
+        <div class="ds-bar"><i style="width:${st.pct}%"></i></div>
+        <small>مهام ${st.td}/${st.tt} • عادات ${st.hd}/${st.ht}</small>
+      </button>`;
+    });
+    $('dsHistBody').innerHTML = n ? h : '<div class="ds-empty">لا يوجد سجل بعد — سيظهر هنا كل يوم تجهّز فيه جدولك</div>';
+    showModal('history');
+  }
 
-    // خطوة 3 — أرقام لاختيار الأيام، A للكل
-    if (planState.step===3) {
-      if (e.key>='1' && e.key<='7') { e.preventDefault(); _toggleDay(parseInt(e.key)-1); return; }
-      if (e.key==='a'||e.key==='A') {
-        e.preventDefault();
-        planState.days = planState.days.length===7 ? [] : [0,1,2,3,4,5,6];
-        document.querySelectorAll('.plan-day-btn').forEach(btn =>
-          btn.classList.toggle('active', planState.days.includes(parseInt(btn.dataset.day))));
+  /* ---------- تغيّر اليوم ---------- */
+  function tick() {
+    const t = todayKey();
+    if (t !== S.today) {
+      const was = S.view === S.today;
+      S.today = t; if (was) S.view = t;
+      S.editing = null; S.confirm = null;
+      render();
+      S.pendingReminder = true;
+    }
+    if (S.pendingReminder && !S.modal && !state.activePopup) { S.pendingReminder = false; openReminder(); }
+  }
+
+  /* ---------- كيبورد (خاص بالجدول) ---------- */
+  function bindKeys() {
+    document.addEventListener('keydown', e => {
+      if (S.modal) {
+        if (state.activePopup) return;            // بوب آب التايمر الإجباري أولى
+        if (e.key === 'Escape') { e.preventDefault(); S.modal === 'prepare' ? requestClosePrepare() : closeModal(); return; }
+        if (S.modal === 'prepare' && (e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); savePrepare(); }
         return;
       }
-    }
-  });
-}
-
-// ==========================================
-// دعم تاب الخطة في switchTab
-// ==========================================
-const _origSwitchTab = switchTab;
-window.switchTab = function(tabName) {
-  _origSwitchTab(tabName);
-  if (tabName === 'plan') {
-    planState.viewDate = todayKey();
-    renderPlanPage();
+      const tag = (document.activeElement.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if ((e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey && !state.activePopup) {
+        e.preventDefault(); openPrepare(S.view < todayKey() ? todayKey() : S.view);
+      }
+    });
+    $('dsOverlay').addEventListener('click', () => { if (S.modal === 'reminder' || S.modal === 'history') closeModal(); });
+    $('dsRemBtns').addEventListener('click', e => { const b = e.target.closest('[data-r]'); if (b) remAction(b.dataset.r); });
+    $('dsHistClose').addEventListener('click', () => closeModal());
+    $('dsHistBody').addEventListener('click', e => {
+      const b = e.target.closest('[data-dk]'); if (!b) return;
+      S.view = b.dataset.dk; S.editing = null; closeModal(true); render();
+    });
   }
-  // تاب المقارنة — لا يحتاج منطق إضافي، Firebase يتولى
-};
 
-// تهيئة الخطة
-document.addEventListener('DOMContentLoaded', () => {
-  setupPlanEvents();
-});
+  /* ---------- تهيئة ---------- */
+  function measureTop() {
+    const t = document.querySelector('.topbar');
+    if (t) document.documentElement.style.setProperty('--topbar-h', t.offsetHeight + 'px');
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    if (!$('dsPanel')) return;
+    const saved = jget(K_UI, null);
+    if (saved && typeof saved === 'object') ui = { collapsed: saved.collapsed ?? null, closed: saved.closed || {} };
+    migrateLegacy();
+    measureTop();
+    if ('ResizeObserver' in window) new ResizeObserver(measureTop).observe(document.querySelector('.topbar'));
+    window.addEventListener('resize', () => { measureTop(); render(); });
+    bindPanel(); bindPrepare(); bindKeys();
+    render();
+    setInterval(tick, 15000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+    // تذكير عند فتح الموقع
+    setTimeout(() => { if (!S.modal && !state.activePopup) openReminder(); }, 500);
+  });
+
+  window.DailySchedule = {
+    togglePanel, openPrepare: () => openPrepare(S.view < todayKey() ? todayKey() : S.view),
+    isModalOpen: () => !!S.modal,
+  };
+})();
+
 // ==========================================
 // مرايا التايمر الرئيسي في صفحة المقارنة
 // ==========================================
