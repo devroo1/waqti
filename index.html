@@ -17,7 +17,6 @@
     <nav class="tabs">
       <button class="tab-btn active" data-tab="timer">التايمر <kbd>Alt+1</kbd></button>
       <button class="tab-btn" data-tab="dashboard">الداش بورد <kbd>Alt+2</kbd></button>
-      <button class="tab-btn" data-tab="plan">الخطة <kbd>Alt+3</kbd></button>
       <button class="tab-btn" data-tab="history">السجل <kbd>Alt+4</kbd></button>
       <button class="tab-btn" data-tab="compare">⚔️ المقارنة <kbd>Alt+5</kbd><span class="tab-notif-dot" id="compareNotifDot" style="display:none"></span></button>
     </nav>
@@ -28,6 +27,20 @@
       <button class="icon-btn" id="guiltSettingsBtn" type="button" title="تخصيص ضربة الضمير" aria-label="تخصيص ضربة الضمير">🎭</button>
     </div>
   </header>
+
+
+  <!-- ====== Daily Schedule: اللوحة الثابتة ====== -->
+  <aside class="ds-panel" id="dsPanel" aria-label="الجدول اليومي">
+    <div class="ds-head" id="dsHead">
+      <div class="ds-mini-ring" id="dsMiniRing" style="--p:0"><span id="dsMiniPct">0%</span></div>
+      <div class="ds-head-main">
+        <div class="ds-title">📅 الجدول اليومي <small dir="ltr">Daily Schedule</small></div>
+        <div class="ds-head-sub" id="dsHeadSub"></div>
+      </div>
+      <button class="ds-icon-btn" id="dsCollapseBtn" type="button" title="إظهار / تصغير [Alt+3]" aria-expanded="true">⇤</button>
+    </div>
+    <div class="ds-body" id="dsBody"></div>
+  </aside>
 
   <!-- ====== لوحة الاختصارات ====== -->
   <div class="shortcuts-overlay" id="shortcutsOverlay"></div>
@@ -60,18 +73,17 @@
         <div class="sp-title">🗂 التنقل</div>
         <div class="sp-row"><kbd>Alt+1</kbd><span>صفحة التايمر</span></div>
         <div class="sp-row"><kbd>Alt+2</kbd><span>الداش بورد</span></div>
-        <div class="sp-row"><kbd>Alt+3</kbd><span>الخطة اليومية</span></div>
+        <div class="sp-row"><kbd>Alt+3</kbd><span>إظهار / تصغير الجدول اليومي</span></div>
         <div class="sp-row"><kbd>Alt+4</kbd><span>السجل</span></div>
-        <div class="sp-row"><kbd>←</kbd><span>يوم سابق (داش بورد / خطة)</span></div>
-        <div class="sp-row"><kbd>→</kbd><span>يوم تالي (داش بورد / خطة)</span></div>
+        <div class="sp-row"><kbd>←</kbd><span>يوم سابق (داش بورد)</span></div>
+        <div class="sp-row"><kbd>→</kbd><span>يوم تالي (داش بورد)</span></div>
       </div>
       <div class="sp-section">
-        <div class="sp-title">📋 الخطة اليومية</div>
-        <div class="sp-row"><kbd>N</kbd><span>إضافة مادة جديدة</span></div>
-        <div class="sp-row"><kbd>←  →</kbd><span>التنقل بين الأيام</span></div>
-        <div class="sp-row"><kbd>.</kbd><span>رجوع لليوم الحالي</span></div>
-        <div class="sp-row"><kbd>1-9</kbd><span>تفعيل موضوع رقم N</span></div>
-        <div class="sp-row"><kbd>Esc</kbd><span>إغلاق بوب آب</span></div>
+        <div class="sp-title">📅 الجدول اليومي</div>
+        <div class="sp-row"><kbd>P</kbd><span>تجهيز / تعديل جدول اليوم</span></div>
+        <div class="sp-row"><kbd>Alt+3</kbd><span>إظهار / تصغير اللوحة</span></div>
+        <div class="sp-row"><kbd>Ctrl+↵</kbd><span>حفظ الجدول (في نافذة التجهيز)</span></div>
+        <div class="sp-row"><kbd>Esc</kbd><span>إغلاق النافذة</span></div>
       </div>
       <div class="sp-section">
         <div class="sp-title">📋 البوب آب</div>
@@ -229,138 +241,6 @@
       </div>
     </div>
   </section>
-
-  <!-- ====== صفحة الخطة اليومية ====== -->
-  <section class="page" id="page-plan">
-
-    <!-- رأس الصفحة: التنقل بين الأيام -->
-    <div class="plan-topbar">
-      <div class="plan-nav">
-        <button class="icon-btn" id="planPrevDay">◀ <kbd>←</kbd></button>
-        <div class="plan-date-info">
-          <span class="plan-date-label" id="planDateLabel">اليوم</span>
-          <span class="plan-date-sub" id="planDateSub"></span>
-        </div>
-        <button class="icon-btn" id="planNextDay"><kbd>→</kbd> ▶</button>
-      </div>
-      <div class="plan-topbar-actions">
-        <button class="icon-btn" id="planGoToday">اليوم <kbd>.</kbd></button>
-        <button class="plan-add-btn" id="planOpenAdd">+ إضافة مادة <kbd>N</kbd></button>
-      </div>
-    </div>
-
-    <!-- شريط أيام الأسبوع -->
-    <div class="plan-week-strip" id="planWeekStrip"></div>
-
-    <!-- شريط التقدم العام لليوم -->
-    <div class="plan-progress-card">
-      <div class="plan-progress-header">
-        <span class="plan-progress-title">تقدم اليوم</span>
-        <span class="plan-progress-pct" id="planProgressPct">0%</span>
-      </div>
-      <div class="plan-progress-bar">
-        <div class="plan-progress-fill" id="planProgressFill" style="width:0%"></div>
-      </div>
-      <div class="plan-progress-counts" id="planProgressCounts">لا توجد مواضيع بعد</div>
-    </div>
-
-    <!-- قائمة المواد -->
-    <div class="plan-subjects" id="planSubjects">
-      <div class="plan-empty" id="planEmpty">
-        <div class="plan-empty-icon">📋</div>
-        <div class="plan-empty-text">لا توجد خطة لهذا اليوم</div>
-        <div class="plan-empty-sub">اضغط "+ إضافة مادة" لتبدأ</div>
-      </div>
-    </div>
-
-  </section>
-
-  <!-- ====== بوب آب إضافة مادة (خطوات) ====== -->
-  <div class="popup plan-popup" id="planPopup">
-
-    <div class="popup-header">
-      <h2 id="planPopupTitle">📚 إضافة مادة</h2>
-      <p id="planPopupSubtitle">اكتب الاسم واضغط Enter للمتابعة</p>
-    </div>
-
-    <!-- شريط الخطوات -->
-    <div class="plan-steps-bar">
-      <div class="plan-step active" data-step="1"><span>1</span> الاسم</div>
-      <div class="plan-step-sep">›</div>
-      <div class="plan-step" data-step="2"><span>2</span> اللون</div>
-      <div class="plan-step-sep">›</div>
-      <div class="plan-step" data-step="3"><span>3</span> الأيام</div>
-      <div class="plan-step-sep">›</div>
-      <div class="plan-step" data-step="4"><span>4</span> المواضيع</div>
-    </div>
-
-    <!-- خطوة 1: الاسم -->
-    <div class="plan-step-panel active" id="planStep1">
-      <label class="plan-step-label">اسم المادة</label>
-      <input type="text" id="planSubjectName" class="plan-input plan-step-input"
-             placeholder="مثال: رياضيات، فيزياء..." maxlength="40" autocomplete="off"/>
-      <div class="plan-step-hint">اضغط <kbd>Enter</kbd> للمتابعة</div>
-    </div>
-
-    <!-- خطوة 2: اللون -->
-    <div class="plan-step-panel" id="planStep2">
-      <label class="plan-step-label">اختر لون المادة</label>
-      <div class="plan-color-row" id="planColorRow">
-        <button type="button" class="plan-color-choice selected" data-color="#6c63ff" style="background:#6c63ff"><kbd>1</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#4ade80" style="background:#4ade80"><kbd>2</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#60a5fa" style="background:#60a5fa"><kbd>3</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#f59e0b" style="background:#f59e0b"><kbd>4</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#f43f5e" style="background:#f43f5e"><kbd>5</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#a78bfa" style="background:#a78bfa"><kbd>6</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#22d3ee" style="background:#22d3ee"><kbd>7</kbd></button>
-        <button type="button" class="plan-color-choice" data-color="#f97316" style="background:#f97316"><kbd>8</kbd></button>
-      </div>
-      <div class="plan-color-preview">
-        <div class="plan-color-preview-dot" id="planColorPreview" style="background:#6c63ff"></div>
-        <span class="plan-color-preview-name" id="planColorName">بنفسجي</span>
-      </div>
-      <div class="plan-step-hint"><kbd>1</kbd>-<kbd>8</kbd> لاختيار اللون &nbsp;•&nbsp; <kbd>Enter</kbd> للمتابعة</div>
-    </div>
-
-    <!-- خطوة 3: الأيام -->
-    <div class="plan-step-panel" id="planStep3">
-      <label class="plan-step-label">أيام التكرار الأسبوعي <span class="plan-label-opt">(اختياري — Enter للتخطي)</span></label>
-      <div class="plan-days-row" id="planDaysRow">
-        <button type="button" class="plan-day-btn" data-day="0">أحد <kbd>1</kbd></button>
-        <button type="button" class="plan-day-btn" data-day="1">إثن <kbd>2</kbd></button>
-        <button type="button" class="plan-day-btn" data-day="2">ثلا <kbd>3</kbd></button>
-        <button type="button" class="plan-day-btn" data-day="3">أرب <kbd>4</kbd></button>
-        <button type="button" class="plan-day-btn" data-day="4">خمي <kbd>5</kbd></button>
-        <button type="button" class="plan-day-btn" data-day="5">جمع <kbd>6</kbd></button>
-        <button type="button" class="plan-day-btn" data-day="6">سبت <kbd>7</kbd></button>
-      </div>
-      <div class="plan-step-hint"><kbd>1</kbd>-<kbd>7</kbd> تحديد الأيام &nbsp;•&nbsp; <kbd>A</kbd> للكل &nbsp;•&nbsp; <kbd>Enter</kbd> للمتابعة</div>
-    </div>
-
-    <!-- خطوة 4: المواضيع -->
-    <div class="plan-step-panel" id="planStep4">
-      <label class="plan-step-label">المواضيع <span class="plan-label-opt">(اختياري — Ctrl+Enter للحفظ)</span></label>
-      <div class="plan-topics-list" id="planTopicsList"></div>
-      <div class="plan-add-topic-row">
-        <input type="text" id="planTopicInput" class="plan-input"
-               placeholder="اكتب الموضوع واضغط Enter..." maxlength="80" autocomplete="off"/>
-        <button type="button" class="plan-add-topic-btn" id="planAddTopicBtn">+ <kbd>↵</kbd></button>
-      </div>
-      <div class="plan-step-hint">
-        <kbd>Enter</kbd> إضافة &nbsp;•&nbsp;
-        <kbd>Backspace</kbd> حذف آخر موضوع (عندما الحقل فاضي) &nbsp;•&nbsp;
-        <kbd>Ctrl+Enter</kbd> حفظ المادة
-      </div>
-    </div>
-
-    <!-- أزرار التنقل -->
-    <div class="plan-popup-footer">
-      <button class="close-btn" id="closePlanPopup">إلغاء <kbd>Esc</kbd></button>
-      <button class="plan-nav-btn" id="planPrevStep">‹ رجوع <kbd>←</kbd></button>
-      <button class="plan-save-btn" id="planSaveSubject" style="display:none">✓ حفظ <kbd>Ctrl+↵</kbd></button>
-      <button class="plan-next-btn" id="planNextStep">التالي › <kbd>Enter</kbd></button>
-    </div>
-  </div>
 
   <!-- ====== صفحة السجل ====== -->
   <section class="page" id="page-history">
@@ -825,6 +705,42 @@
         <button class="cg-btn cg-btn-danger" id="cgResetBtn" type="button">↺ استعادة الافتراضي</button>
       </div>
     </div>
+  </div>
+
+
+  <!-- ====== Daily Schedule: النوافذ ====== -->
+  <div class="ds-overlay" id="dsOverlay"></div>
+
+  <div class="ds-modal ds-prepare" id="dsPrepare" role="dialog" aria-modal="true" aria-labelledby="dsPrepTitle" tabindex="-1">
+    <div class="ds-m-head">
+      <div>
+        <h2 id="dsPrepTitle">📝 Prepare Today's Schedule</h2>
+        <p id="dsPrepSub"></p>
+      </div>
+      <button class="ds-icon-btn" id="dsPrepClose" type="button" aria-label="إغلاق">✕</button>
+    </div>
+    <div class="ds-m-body" id="dsPrepBody"></div>
+    <div class="ds-m-foot">
+      <span class="ds-m-msg" id="dsPrepMsg" role="status"></span>
+      <button class="ds-btn" id="dsPrepCancel" type="button">إلغاء <kbd>Esc</kbd></button>
+      <button class="ds-btn ds-btn-primary" id="dsPrepSave" type="button">💾 Save Schedule <kbd>Ctrl+↵</kbd></button>
+    </div>
+  </div>
+
+  <div class="ds-modal ds-reminder" id="dsReminder" role="dialog" aria-modal="true" aria-labelledby="dsRemTitle" tabindex="-1">
+    <div class="ds-rem-icon" id="dsRemIcon">📅</div>
+    <h2 id="dsRemTitle"></h2>
+    <p class="ds-rem-text" id="dsRemText"></p>
+    <div class="ds-rem-summary" id="dsRemSummary"></div>
+    <div class="ds-rem-btns" id="dsRemBtns"></div>
+  </div>
+
+  <div class="ds-modal ds-history" id="dsHistory" role="dialog" aria-modal="true" aria-labelledby="dsHistTitle" tabindex="-1">
+    <div class="ds-m-head">
+      <div><h2 id="dsHistTitle">📜 سجل الجدول اليومي</h2><p>اضغط على يوم لعرض مهامه وعاداته</p></div>
+      <button class="ds-icon-btn" id="dsHistClose" type="button" aria-label="إغلاق">✕</button>
+    </div>
+    <div class="ds-m-body" id="dsHistBody"></div>
   </div>
 
   <!-- Firebase SDK -->
