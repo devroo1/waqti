@@ -175,6 +175,115 @@ function getSprintDayData(dateKey) {
 let popupQueue = [];    // عدد البوب آبات المنتظرة
 let popupOpen  = false; // هل البوب آب مفتوح الآن؟
 
+/* ============================================================
+ * 🛰 محرك الخلفية (Background Engine)
+ * - الوقت يُحسب دائماً من Date.now() مقابل وقت الانتهاء (timerEndAt)
+ *   وليس بعدّ مرات setInterval، فالتأخير/التبطيء لا يؤثر على الدقة.
+ * - "نبضة" الفحص تأتي من Web Worker (لا يبطّئه المتصفح مثل التاب)،
+ *   ولو الـ Worker غير متاح نرجع لـ setInterval العادي.
+ * - Web Lock يمنع المتصفح من تجميد (Freeze) الصفحة.
+ * ============================================================ */
+let timerEndAt = 0;   // وقت انتهاء الإنتيرفال الحالي (ms)
+const TIMER_KEY = 'wq_bg_timer';
+
+const BG = (() => {
+  let worker = null, fb = null, wanted = false, wantLock = false, lockRelease = null, lockPending = false;
+  const subs = [];
+  function fire() { for (const fn of subs) { try { fn(); } catch (e) { console.error(e); } } }
+
+  function startTicker() {
+    if (worker || fb) return;
+    try {
+      const src = "var id=null;onmessage=function(e){if(e.data==='start'){if(id)clearInterval(id);id=setInterval(function(){postMessage(1)},500)}else{if(id)clearInterval(id);id=null}}";
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      worker = new Worker(url);
+      worker.onmessage = fire;
+      worker.onerror = () => {
+        try { worker.terminate(); } catch (e) {}
+        worker = null;
+        if (wanted && !fb) fb = setInterval(fire, 500);
+      };
+      worker.postMessage('start');
+    } catch (e) {
+      worker = null;
+      if (!fb) fb = setInterval(fire, 500);
+    }
+  }
+  function stopTicker() {
+    if (worker) { try { worker.postMessage('stop'); worker.terminate(); } catch (e) {} worker = null; }
+    if (fb) { clearInterval(fb); fb = null; }
+  }
+  function holdLock() {
+    wantLock = true;
+    if (lockPending || !navigator.locks) return;
+    lockPending = true;
+    try {
+      navigator.locks.request('waqti-bg-keepalive', () => {
+        if (!wantLock) { lockPending = false; return Promise.resolve(); }
+        return new Promise(res => { lockRelease = res; });
+      }).catch(() => { lockPending = false; });
+    } catch (e) { lockPending = false; }
+  }
+  function dropLock() {
+    wantLock = false;
+    if (lockRelease) { lockRelease(); lockRelease = null; lockPending = false; }
+  }
+  return {
+    on(fn) { subs.push(fn); },
+    kick: fire,
+    update() {
+      wanted = state.running || sprint.running;
+      if (wanted) { startTicker(); holdLock(); } else { stopTicker(); dropLock(); }
+    },
+  };
+})();
+
+function persistTimer() {
+  try {
+    if (state.running) {
+      localStorage.setItem(TIMER_KEY, JSON.stringify({
+        endAt: timerEndAt, totalSeconds: state.totalSeconds, intervalNum: state.intervalNum, savedAt: Date.now(),
+      }));
+    }
+  } catch (e) {}
+}
+
+/** يُستدعى مع كل نبضة: يحسب الوقت الحقيقي ويعالج أي إنتيرفال انتهى (حتى لو أكثر من واحد) */
+let _lastShownRemaining = -1;
+function timerCheck() {
+  if (!state.running) return;
+  alertDriftCheck();
+
+  const now     = Date.now();
+  const totalMs = state.totalSeconds * 1000;
+  let ended = 0, needChime = false;
+
+  while (now >= timerEndAt) {
+    if (!alertCovered(timerEndAt)) needChime = true;   // الصوت المجدول ما غطّى هذا الموعد → شغّله يدوياً
+    ended++;
+    state.intervalNum++;
+    popupQueue.push(timerEndAt);
+    timerEndAt += totalMs;
+  }
+
+  state.remaining = Math.max(0, Math.min(state.totalSeconds, Math.ceil((timerEndAt - now) / 1000)));
+
+  if (state.remaining !== _lastShownRemaining || ended > 0) {
+    _lastShownRemaining = state.remaining;
+    updateTimerDisplay();
+    updateRing();
+  }
+
+  if (ended > 0) {
+    document.getElementById('intervalNum').textContent = state.intervalNum;
+    persistTimer();
+    if (needChime) playIntervalSound();
+    scheduleAlerts();
+    sendNotification(ended);
+    drainPopupQueue();
+  }
+}
+
 /** بدء التايمر — يُستدعى مرة واحدة فقط ثم لا يقف أبداً */
 function startTimer() {
   if (state.running) return;
@@ -182,26 +291,45 @@ function startTimer() {
   document.body.classList.add('running');
   updateStartBtn();
 
-  timerTick = setInterval(() => {
-    state.remaining--;
-    updateTimerDisplay();
-    updateRing();
-
-    if (state.remaining <= 0) {
-      // انتهى إنتيرفال — أضف للطابور واستمر فوراً
-      state.intervalNum++;
-      document.getElementById('intervalNum').textContent = state.intervalNum;
-      state.remaining = state.totalSeconds;
-      updateTimerDisplay();
-      updateRing();
-
-      popupQueue.push(Date.now());
-      playIntervalSound();
-      sendNotification();
-      drainPopupQueue();
-    }
-  }, 1000);
+  timerEndAt = Date.now() + state.remaining * 1000;
+  _lastShownRemaining = -1;
+  unlockAudio();          // يُستدعى من ضغطة المستخدم → نفكّ قفل الصوت الآن
+  persistTimer();
+  scheduleAlerts();
+  BG.update();
+  timerCheck();
 }
+
+/** استرجاع تايمر كان شغّالاً (مثلاً إعادة تحميل الصفحة أو تفريغ التاب من الذاكرة) */
+function restoreTimer() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(TIMER_KEY) || 'null'); } catch (e) {}
+  if (!saved) return;
+
+  let navType = 'navigate';
+  try { const nav = performance.getEntriesByType('navigation')[0]; if (nav) navType = nav.type; } catch (e) {}
+
+  const valid = saved.endAt && saved.totalSeconds && (Date.now() - saved.endAt) < 6 * 3600 * 1000;
+  // فتح جديد للموقع = بداية جديدة (مثل السابق). الاسترجاع فقط عند إعادة التحميل.
+  if (navType === 'navigate' || !valid) { try { localStorage.removeItem(TIMER_KEY); } catch (e) {} return; }
+
+  state.totalSeconds    = saved.totalSeconds;
+  state.intervalMinutes = Math.round(saved.totalSeconds / 60);
+  state.intervalNum     = saved.intervalNum || 1;
+  timerEndAt            = saved.endAt;
+  state.running         = true;
+  document.body.classList.add('running');
+  document.getElementById('intervalNum').textContent = state.intervalNum;
+  updateDurDisplay();
+  updateStartBtn();
+  scheduleAlerts();
+  BG.update();
+  timerCheck();
+}
+
+BG.on(timerCheck);
+BG.on(() => sprintCheck());
+BG.on(audioHintCheck);
 
 /**
  * استنزاف الطابور — يعرض البوب آبات واحداً تلو الآخر
@@ -253,42 +381,11 @@ function updateStartBtn() {
 function onIntervalEnd() { /* لم يعد يُستخدم مباشرة */ }
 
 /**
- * Page Visibility API — التايمر يستمر حتى خارج التبويب
- * نحسب الوقت المنقضي عند العودة بدلاً من الإيقاف
+ * Page Visibility — لم نعد نحتاج حساباً خاصاً للغياب:
+ * الوقت يُحسب من الساعة الحقيقية، فنكتفي بتحديث الواجهة فوراً عند العودة.
  */
-let _hiddenAt = null;
-
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    _hiddenAt = Date.now();
-  } else {
-    if (_hiddenAt !== null && state.running) {
-      const elapsed = Math.floor((Date.now() - _hiddenAt) / 1000);
-      _hiddenAt = null;
-
-      let remaining = state.remaining - elapsed;
-      let extra     = 0;
-
-      while (remaining <= 0) {
-        extra++;
-        remaining += state.totalSeconds;
-        state.intervalNum++;
-      }
-
-      state.remaining = remaining;
-      document.getElementById('intervalNum').textContent = state.intervalNum;
-      updateTimerDisplay();
-      updateRing();
-
-      if (extra > 0) {
-        for (let i = 0; i < extra; i++) popupQueue.push(Date.now());
-        playIntervalSound();
-        sendNotification();
-        drainPopupQueue();
-      }
-    }
-    _hiddenAt = null;
-  }
+  if (!document.hidden) { BG.kick(); }
 });
 
 // ==========================================
@@ -399,27 +496,124 @@ function _commitActivity(activityName, durationMinutes = 10) {
 function getAudioCtx() {
   if (!sprint.audioCtx) {
     sprint.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // لو رجع السياق يشتغل بعد ما كان موقوفاً: أعد جدولة التنبيهات على ساعة الصوت
+    sprint.audioCtx.onstatechange = () => {
+      if (sprint.audioCtx.state === 'running' && state.running) scheduleAlerts();
+    };
   }
   return sprint.audioCtx;
 }
 
-/* صوت انتهاء الإنتيرفال الرئيسي */
-function playIntervalSound() {
+/** فكّ قفل الصوت — لازم يُستدعى من ضغطة/زر (سياسة المتصفح) */
+function unlockAudio() {
   try {
-    const ctx   = getAudioCtx();
-    const now   = ctx.currentTime;
-    [523, 659, 784].forEach((freq, i) => {
-      const osc  = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = 'sine'; osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.3, now + i * 0.2);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.2 + 0.4);
-      osc.start(now + i * 0.2);
-      osc.stop(now + i * 0.2 + 0.45);
-    });
+    const ctx = getAudioCtx();
+    if (ctx.state !== 'running') {
+      const p = ctx.resume();
+      if (p && p.catch) p.catch(() => {});
+    }
   } catch (e) {}
 }
+
+/* صوت انتهاء الإنتيرفال الرئيسي */
+function scheduleChime(ctx, startAt) {
+  const nodes = [];
+  [523, 659, 784].forEach((freq, i) => {
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = 'sine'; osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.3, startAt + i * 0.2);
+    gain.gain.exponentialRampToValueAtTime(0.001, startAt + i * 0.2 + 0.4);
+    osc.start(startAt + i * 0.2);
+    osc.stop(startAt + i * 0.2 + 0.45);
+    nodes.push({ osc, gain });
+  });
+  return nodes;
+}
+
+/* نفس النغمة الأصلية بالضبط — تشتغل فوراً */
+function playIntervalSound() {
+  try {
+    const ctx = getAudioCtx();
+    if (ctx.state !== 'running') { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); }
+    scheduleChime(ctx, ctx.currentTime);
+  } catch (e) {}
+}
+
+/**
+ * ⏰ جدولة التنبيهات مسبقاً على ساعة الصوت (Audio Clock)
+ * ساعة الصوت تشتغل في خيط منفصل ولا يبطّئها المتصفح مثل المؤقتات العادية،
+ * فالنغمة تنطلق في موعدها حتى لو التاب بالخلفية أو المتصفح مصغّر.
+ */
+const ALERT_AHEAD = 6;                        // نجدول 6 إنتيرفالات قدّام
+const alertSched  = { entries: [], offset: 0 };
+
+function scheduleAlerts() {
+  if (!state.running) return;
+  try {
+    const ctx    = getAudioCtx();
+    const nowCtx = ctx.currentTime;
+    const nowMs  = Date.now();
+
+    // ألغِ المستقبلية فقط (اللي ما انطلقت) — واحتفظ بالقريبة للمقارنة
+    alertSched.entries = alertSched.entries.filter(en => {
+      if (en.when > nowCtx + 0.05) {
+        en.nodes.forEach(n => { try { n.osc.stop(0); n.gain.disconnect(); } catch (e) {} });
+        return false;
+      }
+      return en.when + 3 > nowCtx;
+    });
+
+    alertSched.offset = nowCtx - nowMs / 1000;
+    const totalMs = state.totalSeconds * 1000;
+    for (let k = 0; k < ALERT_AHEAD; k++) {
+      const t = timerEndAt + k * totalMs;
+      if (alertSched.entries.some(en => en.t === t)) continue;
+      const delay = (t - nowMs) / 1000;
+      if (delay <= 0.02) continue;
+      const when = nowCtx + delay;
+      alertSched.entries.push({ t, when, nodes: scheduleChime(ctx, when) });
+    }
+  } catch (e) {}
+}
+
+/** هل في نغمة مجدولة على الصوت لهذا الموعد؟ (لتجنّب تكرار الصوت) */
+function alertCovered(t) {
+  const ctx = sprint.audioCtx;
+  if (!ctx || ctx.state !== 'running') return false;
+  return alertSched.entries.some(en => en.t === t);
+}
+
+/** لو ساعة الصوت انحرفت عن ساعة النظام (مثلاً توقّف السياق) → أعد الجدولة */
+function alertDriftCheck() {
+  const ctx = sprint.audioCtx;
+  if (!ctx || ctx.state !== 'running' || !state.running) return;
+  const off = ctx.currentTime - Date.now() / 1000;
+  if (Math.abs(off - alertSched.offset) > 0.5) scheduleAlerts();
+}
+
+/* شريط صغير يظهر فقط لو الصوت غير مفعّل (مثلاً بعد إعادة تحميل الصفحة) */
+function audioHintCheck() {
+  const need = (state.running || sprint.running) &&
+               (!sprint.audioCtx || sprint.audioCtx.state !== 'running');
+  let el = document.getElementById('wqAudioHint');
+  if (need && !el && document.body) {
+    el = document.createElement('div');
+    el.id = 'wqAudioHint';
+    el.textContent = '🔊 اضغط هنا لتفعيل صوت التنبيه';
+    el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:10px 18px;' +
+      'border-radius:12px;background:#1f2937;color:#fff;border:1px solid #f59e0b;z-index:99999;' +
+      'font:inherit;font-size:.85rem;cursor:pointer;box-shadow:0 6px 24px rgba(0,0,0,.4)';
+    el.addEventListener('click', () => { unlockAudio(); });
+    document.body.appendChild(el);
+  } else if (!need && el) {
+    el.remove();
+  }
+}
+
+['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
+  document.addEventListener(ev, () => { if (state.running || sprint.running) unlockAudio(); }, true));
 
 /**
  * صوت السبرينت — نبضة هادئة كل ثانية تشبه دقات الساعة
@@ -492,14 +686,59 @@ function playSprintSaveSound() {
   } catch (e) {}
 }
 
-function sendNotification() {
+function sendNotification(count = 1) {
+  // لا نطلب الإذن هنا أبداً — الطلب يتم فقط من زر 🔔 في الشريط العلوي
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification('⏰ وقتي — انتهى الإنتيرفال!', {
+      body: count > 1
+        ? `انتهت ${count} إنتيرفالات — ماذا كنت تفعل؟`
+        : `ماذا كنت تفعل في آخر ${state.intervalMinutes} دقائق؟`,
+      tag: 'waqti-interval',
+      renotify: true,
+      requireInteraction: true,
+    });
+    n.onclick = () => { try { window.focus(); } catch (e) {} n.close(); };
+  } catch (e) {}
+}
+
+/* ---- زر 🔔 : طلب إذن الإشعارات + تجربة التنبيه ---- */
+function updateNotifBtn() {
+  const b = document.getElementById('notifBtn');
+  if (!b) return;
+  if (!('Notification' in window)) { b.style.display = 'none'; return; }
+  const p = Notification.permission;
+  if (p === 'granted') {
+    b.textContent = '🔔 ✓';
+    b.title = 'الإشعارات مفعّلة — اضغط لتجربة التنبيه (صوت + إشعار)';
+  } else if (p === 'denied') {
+    b.textContent = '🔕';
+    b.title = 'الإشعارات محظورة — فعّلها من إعدادات الموقع (أيقونة القفل بجانب العنوان)';
+  } else {
+    b.textContent = '🔔';
+    b.title = 'تفعيل إشعارات انتهاء الإنتيرفال';
+  }
+}
+
+function testAlert() {
+  playIntervalSound();
+  try {
+    new Notification('⏰ وقتي — تجربة التنبيه', { body: 'الصوت والإشعارات يعملان ✅', tag: 'waqti-test' });
+  } catch (e) {}
+}
+
+function onNotifBtnClick() {
+  unlockAudio();
   if (!('Notification' in window)) return;
   if (Notification.permission === 'granted') {
-    new Notification('⏰ وقتي — انتهى الإنتيرفال!', {
-      body: 'ماذا كنت تفعل في آخر 10 دقائق؟',
+    testAlert();
+  } else if (Notification.permission === 'denied') {
+    alert('الإشعارات محظورة لهذا الموقع.\nاضغط على أيقونة القفل 🔒 بجانب عنوان الموقع ثم اسمح بالإشعارات.');
+  } else {
+    Promise.resolve(Notification.requestPermission()).then(() => {
+      updateNotifBtn();
+      if (Notification.permission === 'granted') testAlert();
     });
-  } else if (Notification.permission !== 'denied') {
-    Notification.requestPermission();
   }
 }
 
@@ -909,24 +1148,45 @@ function sprintStart() {
   document.getElementById('swStart').innerHTML = '⏸ إيقاف <kbd>S</kbd>';
   document.getElementById('swStatusLabel').textContent = 'يعمل';
 
-  sprint.tickId = setInterval(() => {
-    sprint.elapsed++;
-    sprint.beatCount++;
+  // ⏱ يعتمد على الوقت الحقيقي: لا يتأخر لو المتصفح بالخلفية
+  sprint.base     = sprint.elapsed;
+  sprint.runStart = Date.now();
+  unlockAudio();
+  BG.update();
+}
 
-    // دقة كل ثانية (تيك-توك)
-    playSprintTick(sprint.beatCount % 2 === 0);
+/** يحسب الوقت المنقضي من الساعة الحقيقية (بدون أصوات) */
+function sprintSyncElapsed() {
+  if (sprint.running && sprint.runStart) {
+    sprint.elapsed = (sprint.base || 0) + Math.floor((Date.now() - sprint.runStart) / 1000);
+  }
+}
 
-    // نغمة كل دقيقة كاملة
-    if (sprint.elapsed % 60 === 0) playSprintMinuteBell();
+/** نبضة السبرينت — تُستدعى من محرك الخلفية */
+function sprintCheck() {
+  if (!sprint.running || !sprint.runStart) return;
+  const prev = sprint.elapsed;
+  sprintSyncElapsed();
+  if (sprint.elapsed === prev) return;
 
-    updateSprintDisplay();
-  }, 1000);
+  sprint.beatCount += (sprint.elapsed - prev);
+
+  // دقة كل ثانية (تيك-توك)
+  playSprintTick(sprint.beatCount % 2 === 0);
+
+  // نغمة كل دقيقة كاملة
+  if (Math.floor(sprint.elapsed / 60) > Math.floor(prev / 60)) playSprintMinuteBell();
+
+  updateSprintDisplay();
 }
 
 function sprintPause() {
   if (!sprint.running) return;
-  sprint.running = false;
+  sprintSyncElapsed();
+  sprint.running  = false;
+  sprint.runStart = null;
   clearInterval(sprint.tickId); sprint.tickId = null;
+  BG.update();
   document.getElementById('sprintWidget').classList.remove('sw-running');
   document.getElementById('swStart').innerHTML = '▶ ابدأ <kbd>S</kbd>';
   document.getElementById('swStatusLabel').textContent = 'متوقف';
@@ -943,6 +1203,7 @@ function sprintReset() {
  * حفظ الجلسة الحالية وإعادة تعيين العداد
  */
 function sprintSave() {
+  sprintSyncElapsed();
   if (sprint.elapsed < 5) return; // تجاهل الجلسات القصيرة جداً
 
   sprintPause();
@@ -1457,11 +1718,12 @@ function setupEventListeners() {
 
   /* ---- بدء التايمر بالضغط الطبيعي على الزر ---- */
   document.getElementById('startBtn').addEventListener('click', () => {
-    if ('Notification' in window && Notification.permission==='default') {
-      Notification.requestPermission();
-    }
     if (!state.running) startTimer();
   });
+
+  /* ---- زر 🔔 الإشعارات ---- */
+  const nb = document.getElementById('notifBtn');
+  if (nb) nb.addEventListener('click', onNotifBtnClick);
 }
 
 // ==========================================
@@ -1487,9 +1749,8 @@ document.addEventListener('DOMContentLoaded', () => {
   updateSprintDisplay();
   updateMinuteBars();
 
-  if ('Notification' in window && Notification.permission==='default') {
-    Notification.requestPermission();
-  }
+  updateNotifBtn();   // فقط يعرض حالة الإذن — لا يطلبه تلقائياً
+  restoreTimer();     // لو الصفحة أُعيد تحميلها والتايمر كان شغّالاً
 });
 
 
