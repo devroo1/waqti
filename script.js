@@ -3096,8 +3096,66 @@ document.addEventListener('DOMContentLoaded', cgInit);
 
     body.innerHTML = h;
     body.scrollTop = scroll;
+    renderFloat();
 
     if (S.refocus) { const el = body.querySelector(S.refocus); S.refocus = null; if (el) { el.focus(); if (el.select && el.dataset.edit) el.select(); } }
+  }
+
+  /* =====================================================
+     المربع العائم — مهام اليوم (عرض فقط)
+     يقرأ مباشرة من جدول اليوم الحالي ولا يخزّن مهامًا خاصة به،
+     ويحفظ فقط حالة الفتح/التصغير في waqti_ds_float
+     ===================================================== */
+  const K_FLOAT = 'waqti_ds_float';
+  let floatOpen = (() => { const f = jget(K_FLOAT, null); return f && typeof f.open === 'boolean' ? f.open : window.innerWidth > 700; })();
+  const safeColor = c => /^#[0-9a-f]{3,8}$/i.test(c || '') ? c : '';
+
+  function renderFloat() {
+    const box = $('tfBox'); if (!box) return;
+    const rec = normDay(loadDay(todayKey()));
+    const items = [];
+    if (rec.prepared) rec.subjects.forEach(s => s.tasks.forEach(t => { if (String(t.text || '').trim()) items.push({ s, t }); }));
+    const done = items.filter(x => x.t.done).length, left = items.length - done;
+
+    box.classList.toggle('min', !floatOpen);
+    if (!floatOpen) {
+      const all = items.length > 0 && left === 0;
+      const label = !items.length ? 'مهام اليوم' : all ? '<b>✓ أنجزت كل المهام</b>' : `<b>${left}</b> متبقية`;
+      box.innerHTML = `<button class="tf-fab${all ? ' all-done' : ''}" type="button" data-tf="toggle" title="إظهار مهام اليوم" aria-expanded="false">📋 ${label}</button>`;
+      return;
+    }
+
+    let h = `<div class="tf-box"><div class="tf-head">
+      <span class="tf-title">📋 مهام اليوم</span>
+      ${items.length ? `<span class="tf-count"><b>✓ ${done}</b> · <i>${left}</i> متبقية</span>` : ''}
+      <button class="tf-min" type="button" data-tf="toggle" title="تصغير" aria-label="تصغير" aria-expanded="true">–</button>
+    </div>`;
+    if (!items.length) {
+      h += '<div class="tf-empty">لا توجد مهام مجدولة اليوم</div>';
+    } else {
+      h += '<ul class="tf-list">';
+      items.forEach(({ s, t }) => {
+        const col = safeColor(s.color);
+        h += `<li class="tf-row${t.done ? ' done' : ''}"${col ? ` style="--c:${col}"` : ''}>
+          <span class="tf-mark">✓</span>
+          <span class="tf-txt"><span class="tf-subj">${esc(s.name || 'مادة')}</span><span class="tf-dash">—</span><span class="tf-task">${esc(t.text)}</span></span>
+        </li>`;
+      });
+      h += '</ul>';
+    }
+    box.innerHTML = h + '</div>';
+  }
+
+  function bindFloat() {
+    const box = $('tfBox'); if (!box) return;
+    box.addEventListener('click', e => {
+      if (!e.target.closest('[data-tf="toggle"]')) return;
+      floatOpen = !floatOpen;
+      jset(K_FLOAT, { open: floatOpen });
+      renderFloat();
+    });
+    // تعديل من تبويب آخر لنفس الموقع
+    window.addEventListener('storage', e => { if (!e.key || e.key.startsWith(K_DAY)) renderFloat(); });
   }
 
   function findSubj(rec, k) { return rec.subjects.find(s => s.key === k); }
@@ -3475,7 +3533,7 @@ document.addEventListener('DOMContentLoaded', cgInit);
     measureTop();
     if ('ResizeObserver' in window) new ResizeObserver(measureTop).observe(document.querySelector('.topbar'));
     window.addEventListener('resize', () => { measureTop(); render(); });
-    bindPanel(); bindPrepare(); bindKeys();
+    bindPanel(); bindPrepare(); bindKeys(); bindFloat();
     render();
     setInterval(tick, 15000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });

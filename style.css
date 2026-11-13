@@ -2274,3 +2274,69 @@ body.ds-collapsed { --ds-w: 62px; }
   .ds-prow .ds-in:not(.ds-in-n) { flex: 1 1 60%; }
   .ds-title small { display: none; }
 }
+
+/* ==========================================
+   📌 المربع العائم — مهام اليوم (عرض فقط)
+   ========================================== */
+.tf {
+  position: fixed; bottom: 16px; right: calc(var(--ds-w, 0px) + 16px); z-index: 85;
+  width: 250px; max-width: calc(100vw - 32px);
+  transition: right var(--tr);
+}
+@media (max-width: 1099px) { .tf { right: 16px; } }
+
+.tf-box {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.tf-head {
+  display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+}
+.tf-title { font-weight: 900; font-size: .84rem; flex: 1; white-space: nowrap; }
+.tf-count { font-size: .7rem; font-weight: 700; color: var(--text2); white-space: nowrap; }
+.tf-count b { color: var(--green); }
+.tf-count i { font-style: normal; color: var(--accent2); font-weight: 800; }
+.tf-min {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text2);
+  width: 24px; height: 24px; border-radius: 7px; cursor: pointer; font-size: .8rem; line-height: 1;
+  font-family: inherit; display: grid; place-items: center; flex: none;
+}
+.tf-min:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.tf-list {
+  list-style: none; margin: 0; padding: 6px; max-height: min(42vh, 300px); overflow-y: auto;
+}
+.tf-row {
+  --c: var(--accent);
+  display: flex; align-items: flex-start; gap: 7px; padding: 6px 8px; border-radius: 9px;
+  font-size: .78rem; line-height: 1.5;
+}
+.tf-row + .tf-row { margin-top: 1px; }
+.tf-row:hover { background: var(--bg2); }
+.tf-mark {
+  flex: none; width: 16px; height: 16px; margin-top: 3px; border-radius: 50%;
+  border: 2px solid var(--c); display: grid; place-items: center;
+  font-size: .62rem; font-weight: 900; color: transparent;
+}
+.tf-txt { min-width: 0; overflow-wrap: anywhere; }
+.tf-subj { color: var(--c); font-weight: 800; }
+.tf-dash { color: var(--text3); margin: 0 3px; }
+.tf-task { color: var(--text); font-weight: 600; }
+.tf-row.done .tf-mark { background: var(--c); color: #fff; }
+.tf-row.done .tf-task { text-decoration: line-through; color: var(--text3); }
+.tf-row.done .tf-subj { opacity: .55; }
+.tf-empty { padding: 16px 12px; text-align: center; color: var(--text3); font-size: .78rem; font-weight: 600; }
+
+/* حالة التصغير: زر صغير يعرض عدد المتبقي */
+.tf-fab {
+  margin-inline-start: auto; display: flex; align-items: center; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  height: 40px; padding: 0 14px; border-radius: 100px; cursor: pointer;
+  box-shadow: var(--shadow); font-family: inherit; font-size: .8rem; font-weight: 800;
+  transition: transform .2s ease, border-color .2s ease;
+}
+.tf-fab:hover { transform: translateY(-2px); border-color: var(--accent); }
+.tf-fab b { color: var(--accent2); }
+.tf-fab.all-done b { color: var(--green); }
+.tf.min { width: auto; display: flex; }
